@@ -137,6 +137,12 @@ configs:
                 key: ''
                 secret: ''
                 useChecksum: 'true'
+            # read straight from the file by migrateInitUser, so the section has to exist
+            initUser:
+                enabled: 'false'
+                email: ''
+                username: ''
+                password: ''
             legal:
                 enabled: 'false'
                 imprintText: ''
