@@ -102,10 +102,12 @@ configs:
                     User = get_user_model()
                     user, _ = User.objects.get_or_create(
                         username=USERNAME,
-                        defaults={"is_staff": True, "is_superuser": True},
+                        defaults={"is_staff": True, "is_superuser": True, "user_level": 10},
                     )
                     user.is_staff = True
                     user.is_superuser = True
+                    # the first-run setup page closes on user_level, not on is_superuser
+                    user.user_level = 10
                     user.set_unusable_password()
                     user.save()
                     CoreSettings.objects.update_or_create(
