@@ -11,7 +11,12 @@ services:
             TRUST_PROXY: true # Set to true if a reverse proxy is in front of the container
             API_URL: https://pingvin.${DOMAINNAME}
 
-            # setup OIDC on the frontend
+        configs:
+            # the configuration, oidc client included, comes from this file, so
+            # nothing has to be set up in the admin UI. while it exists pingvin
+            # serves those settings read-only.
+            - source: pingvin_config
+              target: /opt/app/config.yaml
         volumes:
             - "${APP_ROOT}/pingvin/uploads/uploads:/opt/app/backend/data/uploads"
             - "${APP_ROOT}/pingvin/data:/opt/app/backend/data"
@@ -29,6 +34,26 @@ services:
             homepage.name: Pingvin Share
             homepage.icon: sh-pingvin-share.svg
             homepage.href: https://pingvin.${DOMAINNAME}
+configs:
+    pingvin_config:
+        content: |
+            # values taken over from the admin UI, plus the authelia oidc client
+            general:
+                appName: 'File Sharing'
+                appUrl: 'https://pingvin.${DOMAINNAME}'
+                secureCookies: 'true'
+                showHomePage: 'false'
+            share:
+                allowRegistration: 'false'
+                allowUnauthenticatedShares: 'false'
+            oauth:
+                oidc-enabled: 'true'
+                oidc-discoveryUri: 'https://auth.${DOMAINNAME}/.well-known/openid-configuration'
+                oidc-clientId: 'pingvin'
+                oidc-clientSecret: '${PINGVIN_OIDC_CLIENT_SECRET:?}'
+                oidc-signOut: 'true'
+                oidc-scope: 'openid email profile groups'
+
 # volumes:
 #     pingvin-data:
 #         name: pingvin-data

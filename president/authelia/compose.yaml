@@ -32,6 +32,10 @@ services:
             AUTHELIA_SESSION_SECRET: ${AUTHELIA_SESSION_SECRET:?}
             AUTHELIA_STORAGE_ENCRYPTION_KEY: ${AUTHELIA_STORAGE_ENCRYPTION_KEY:?}
 
+            # oidc provider: signing key is generated once into APP_ROOT/authelia/config/oidc
+            AUTHELIA_IDENTITY_PROVIDERS_OIDC_HMAC_SECRET: ${AUTHELIA_OIDC_HMAC_SECRET:?}
+            AUTHELIA_IDENTITY_PROVIDERS_OIDC_ISSUER_PRIVATE_KEY_FILE: '/config/oidc/issuer.pem'
+
         labels:
             traefik.enable: true
             traefik.http.routers.authelia-rtr.rule: Host(`auth.${DOMAINNAME}`)

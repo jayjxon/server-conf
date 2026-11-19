@@ -82,6 +82,9 @@ cd ../media && cp example.env .env
 | `CF_API_EMAIL` | yes | Cloudflare account email |
 | `CF_DNS_API_TOKEN` | yes | token described above |
 | `DISPATCHARR_SECRET_KEY` | yes | Django signing key, 50+ random alphanumerics (`openssl rand -hex 32`) |
+| `AUTHELIA_OIDC_HMAC_SECRET` | yes | hmac key for authelia's oidc provider |
+| `PINGVIN_OIDC_CLIENT_SECRET` | yes | plaintext client secret handed to pingvin |
+| `PINGVIN_OIDC_CLIENT_SECRET_HASH` | yes | pbkdf2 hash of the same secret, single-quoted |
 | `AUTHELIA_ADMIN_PASSWORD_HASH` | yes | argon2id digest of the admin password, single-quoted (step 3) |
 | `AUTHELIA_SESSION_SECRET` | yes | 32+ random bytes, hex |
 | `AUTHELIA_STORAGE_ENCRYPTION_KEY` | yes | 32+ random bytes, hex |
@@ -193,10 +196,40 @@ only picked up by a recreate:
 docker compose up -d --force-recreate authelia
 ```
 
+#### OIDC for pingvin share
+
+Authelia is the OIDC provider. The client is declared in `configuration.yml` (id `pingvin`,
+callback `https://pingvin.DOMAINNAME/api/oauth/callback/oidc`) and its secrets live in `.env`,
+so nothing is clicked in a UI. Two things must exist before authelia starts:
+
+```bash
+cd president && . ./.env
+
+# signing key: generated once, kept next to authelia's state
+mkdir -p "$APP_ROOT/authelia/config/oidc"
+openssl genrsa -out "$APP_ROOT/authelia/config/oidc/issuer.pem" 4096
+chmod 600 "$APP_ROOT/authelia/config/oidc/issuer.pem"
+
+# client secret: plaintext for pingvin, pbkdf2 hash for authelia
+SECRET=$(openssl rand -hex 32)
+echo "PINGVIN_OIDC_CLIENT_SECRET=$SECRET" >> .env
+docker run --rm --entrypoint authelia authelia/authelia:4.39.28 \
+    crypto hash generate pbkdf2 --password "$SECRET" |
+    sed -n 's/^Digest: //p' |
+    xargs -I{} echo "PINGVIN_OIDC_CLIENT_SECRET_HASH='{}'" >> .env
+
+echo "AUTHELIA_OIDC_HMAC_SECRET=$(openssl rand -hex 32)" >> .env
+```
+
+Pingvin's own settings are a compose config mounted at `/opt/app/config.yaml`: the app name,
+URL, cookie and registration flags that were set in its UI, plus the OIDC client. While that
+file exists, pingvin's admin UI is read-only for those keys — change the values in
+`president/pingvin/compose.yaml` and recreate the container instead.
+
 1.  Authelia protects **three** routes — the homepage at `DOMAINNAME`, the traefik dashboard at
     `traefik.DOMAINNAME` and dispatcharr at `dispatcharr.DOMAINNAME`. `jellyfin.`, `pingvin.`,
-    `static` (`.well-known`) and the `auth.` portal itself are public; jellyfin and pingvin have
-    to enforce their own auth.
+    `static` (`.well-known`) and the `auth.` portal itself are public; jellyfin enforces its own
+    auth and pingvin signs in through authelia's OIDC provider.
 
 2.  The first login also enrols a TOTP device (the `totp` section is enabled), so have an
     authenticator app ready.
@@ -343,6 +376,7 @@ Two rules keep it that way when adding services:
 | `president/crowdsec/config/` | mounted as-is (acquis + whitelist) | `docker compose restart crowdsec` |
 | `${APP_ROOT}/dispatcharr/data` | plain bind mount at `/data` | `docker compose restart dispatcharr` |
 | `president/static/web/` | bind-mounted read-only, `{{env "DOMAINNAME"}}` expanded by caddy's `templates` directive | `docker compose restart static` |
+| `president/pingvin/compose.yaml` (configs) | rendered to `/opt/app/config.yaml`, oidc included | `docker compose up -d --force-recreate pingvin-share` |
 
 ## Exit node
 
