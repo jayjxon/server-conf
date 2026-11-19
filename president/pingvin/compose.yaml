@@ -1,6 +1,6 @@
 services:
     pingvin-share:
-        image: stonith404/pingvin-share # or ghcr.io/stonith404/pingvin-share
+        image: stonith404/pingvin-share # or ghcr.io/stonith404/pingvin-share
         container_name: pingvin-share
         restart: unless-stopped
         user: ${PUID}:${PGID}
@@ -10,11 +10,11 @@ services:
         environment:
             TRUST_PROXY: true # Set to true if a reverse proxy is in front of the container
             API_URL: https://pingvin.${DOMAINNAME}
-
         configs:
-            # the configuration, oidc client included, comes from this file, so
-            # nothing has to be set up in the admin UI. while it exists pingvin
-            # serves those settings read-only.
+            # the whole configuration, oidc client included, comes from this file,
+            # so nothing has to be set up in the admin UI. while it exists pingvin
+            # serves those settings read-only. every section has to be present, a
+            # partial file replaces the defaults instead of merging with them.
             - source: pingvin_config
               target: /opt/app/config.yaml
         volumes:
@@ -24,36 +24,19 @@ services:
 
         networks:
             - traefik
+        expose:
+            - 3000
 
         labels:
             traefik.enable: true
 
             traefik.http.routers.pingvin-share-rtr.rule: Host(`pingvin.${DOMAINNAME}`)
+            traefik.http.services.pingvin-share-svc.loadbalancer.server.port: 3000
 
             homepage.group: media
             homepage.name: Pingvin Share
             homepage.icon: sh-pingvin-share.svg
             homepage.href: https://pingvin.${DOMAINNAME}
-configs:
-    pingvin_config:
-        content: |
-            # values taken over from the admin UI, plus the authelia oidc client
-            general:
-                appName: 'File Sharing'
-                appUrl: 'https://pingvin.${DOMAINNAME}'
-                secureCookies: 'true'
-                showHomePage: 'false'
-            share:
-                allowRegistration: 'false'
-                allowUnauthenticatedShares: 'false'
-            oauth:
-                oidc-enabled: 'true'
-                oidc-discoveryUri: 'https://auth.${DOMAINNAME}/.well-known/openid-configuration'
-                oidc-clientId: 'pingvin'
-                oidc-clientSecret: '${PINGVIN_OIDC_CLIENT_SECRET:?}'
-                oidc-signOut: 'true'
-                oidc-scope: 'openid email profile groups'
-
 # volumes:
 #     pingvin-data:
 #         name: pingvin-data
@@ -63,3 +46,100 @@ configs:
 #             device: ${APP_ROOT}/pingvin/uploads/pingvin.img
 #             # https://stackoverflow.com/questions/62586541/volume-device-disk-mount-docker-compose-error-not-a-directory
 #             # o: bind
+
+configs:
+    pingvin_config:
+        content: |
+            # values as they were set in the admin UI, plus the authelia oidc client
+            general:
+                appName: 'File Sharing'
+                appUrl: 'https://pingvin.${DOMAINNAME}'
+                secureCookies: 'true'
+                showHomePage: 'false'
+                sessionDuration: '3 months'
+            share:
+                allowRegistration: 'false'
+                allowUnauthenticatedShares: 'false'
+                maxExpiration: '0 days'
+                shareIdLength: '8'
+                maxSize: '1000000000'
+                zipCompressionLevel: '9'
+                chunkSize: '10000000'
+                autoOpenShareModal: 'false'
+            cache:
+                redis-enabled: 'false'
+                redis-url: 'redis://pingvin-redis:6379'
+                ttl: '60'
+                maxItems: '1000'
+            email:
+                enableShareEmailRecipients: 'false'
+                shareRecipientsSubject: 'Files shared with you'
+                shareRecipientsMessage: "Hey!\n\n{creator} ({creatorEmail}) shared some files with you. You can view or download the files with this link: {shareUrl}\n\nThe share will expire {expires}.\n\nNote: {desc}\n\nShared securely with Pingvin Share"
+                reverseShareSubject: 'Reverse share link used'
+                reverseShareMessage: "Hey!\n\nA share was just created with your reverse share link: {shareUrl}\n\nShared securely with Pingvin Share"
+                resetPasswordSubject: 'Pingvin Share password reset'
+                resetPasswordMessage: "Hey!\n\nYou requested a password reset. Click this link to reset your password: {url}\nThe link expires in an hour.\n\nPingvin Share"
+                inviteSubject: 'Pingvin Share invite'
+                inviteMessage: "Hey!\n\nYou were invited to Pingvin Share. Click this link to accept the invite: {url}\n\nYou can use the email \"{email}\" and the password \"{password}\" to sign in.\n\nShared securely with Pingvin Share"
+            smtp:
+                enabled: 'false'
+                allowUnauthorizedCertificates: 'false'
+                host: ''
+                port: '0'
+                email: ''
+                username: ''
+                password: ''
+            ldap:
+                enabled: 'false'
+                url: ''
+                bindDn: ''
+                bindPassword: ''
+                searchBase: ''
+                searchQuery: ''
+                adminGroups: ''
+                fieldNameMemberOf: 'memberOf'
+                fieldNameEmail: 'userPrincipalName'
+            oauth:
+                allowRegistration: 'true'
+                ignoreTotp: 'true'
+                disablePassword: 'false'
+                github-enabled: 'false'
+                github-clientId: ''
+                github-clientSecret: ''
+                google-enabled: 'false'
+                google-clientId: ''
+                google-clientSecret: ''
+                microsoft-enabled: 'false'
+                microsoft-tenant: 'common'
+                microsoft-clientId: ''
+                microsoft-clientSecret: ''
+                discord-enabled: 'false'
+                discord-limitedGuild: ''
+                discord-limitedUsers: ''
+                discord-clientId: ''
+                discord-clientSecret: ''
+                oidc-enabled: 'true'
+                oidc-discoveryUri: 'https://auth.${DOMAINNAME}/.well-known/openid-configuration'
+                oidc-signOut: 'true'
+                oidc-scope: 'openid email profile groups'
+                oidc-usernameClaim: ''
+                oidc-rolePath: ''
+                oidc-roleGeneralAccess: ''
+                oidc-roleAdminAccess: ''
+                oidc-clientId: 'pingvin'
+                oidc-clientSecret: '${PINGVIN_OIDC_CLIENT_SECRET:?}'
+            s3:
+                enabled: 'false'
+                endpoint: ''
+                region: ''
+                bucketName: ''
+                bucketPath: ''
+                key: ''
+                secret: ''
+                useChecksum: 'true'
+            legal:
+                enabled: 'false'
+                imprintText: ''
+                imprintUrl: ''
+                privacyPolicyText: ''
+                privacyPolicyUrl: ''
