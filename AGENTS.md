@@ -79,6 +79,27 @@ Two things that follow from this:
 -   Users live in the file backend; the second factor (TOTP) enrolment is stored in
     `db.sqlite3` under `APP_ROOT`, so a lost authenticator means clearing that identity, not
     resetting the password.
+-   `identity_providers.oidc` makes authelia the provider for pingvin share. The signing key is
+    generated once at `APP_ROOT/authelia/config/oidc/issuer.pem` and handed over as
+    `AUTHELIA_IDENTITY_PROVIDERS_OIDC_ISSUER_PRIVATE_KEY_FILE`; the hmac secret and the client
+    hash are plain variables in `.env`.
+-   A variable referenced as `${...}` inside `configuration.yml` has to be in the authelia
+    container's environment — the `expand-env` filter sees nothing else. Referencing an
+    unset one expands to an empty string, which surfaces as `option 'x' is required`.
+-   OIDC client secrets are **pbkdf2 hashes**, not plaintext: the plaintext value goes to the
+    client, the hash into `configuration.yml`. Both contain `$`, so the hash is single-quoted
+    in `.env` like the argon2 digest.
+
+## Pingvin Share
+
+-   Its entire configuration is a compose config mounted at `/opt/app/config.yaml`: the values
+    that used to be set in the admin UI plus the OIDC client. While that file exists the UI
+    shows those settings read-only, so the compose file is the source of truth.
+-   A YAML config **replaces** the values instead of merging into them, and
+    `ConfigService.migrateInitUser` reads `initUser` straight out of the parsed file. Leave a
+    section out and the backend exits with `Cannot read properties of undefined (reading
+    'enabled')`; traefik then serves the catch-all error-page router, so the symptom looks like
+    a routing fault rather than a crash. `initUser.enabled: 'false'` is enough to satisfy it.
 
 ## Traefik and CrowdSec
 
