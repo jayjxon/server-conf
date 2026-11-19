@@ -36,6 +36,10 @@ services:
             AUTHELIA_IDENTITY_PROVIDERS_OIDC_HMAC_SECRET: ${AUTHELIA_OIDC_HMAC_SECRET:?}
             AUTHELIA_IDENTITY_PROVIDERS_OIDC_ISSUER_PRIVATE_KEY_FILE: '/config/oidc/issuer.pem'
 
+            # the client hashes are referenced by name in configuration.yml, so they
+            # have to be in this container's environment for the expand-env filter
+            PINGVIN_OIDC_CLIENT_SECRET_HASH: ${PINGVIN_OIDC_CLIENT_SECRET_HASH:?}
+
         labels:
             traefik.enable: true
             traefik.http.routers.authelia-rtr.rule: Host(`auth.${DOMAINNAME}`)
