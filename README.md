@@ -81,6 +81,7 @@ cd ../media && cp example.env .env
 | `APP_ROOT` | yes | absolute path to the private app data on the VPS |
 | `CF_API_EMAIL` | yes | Cloudflare account email |
 | `CF_DNS_API_TOKEN` | yes | token described above |
+| `DISPATCHARR_SECRET_KEY` | yes | Django signing key, 50+ random alphanumerics (`openssl rand -hex 32`) |
 | `AUTHELIA_ADMIN_PASSWORD_HASH` | yes | argon2id digest of the admin password, single-quoted (step 3) |
 | `AUTHELIA_SESSION_SECRET` | yes | 32+ random bytes, hex |
 | `AUTHELIA_STORAGE_ENCRYPTION_KEY` | yes | 32+ random bytes, hex |
@@ -192,9 +193,10 @@ only picked up by a recreate:
 docker compose up -d --force-recreate authelia
 ```
 
-1.  Authelia only protects **two** routes — the homepage at `DOMAINNAME` and the traefik
-    dashboard at `traefik.DOMAINNAME`. `jellyfin.`, `pingvin.`, `static` (`.well-known`) and
-    the `auth.` portal itself are public; jellyfin and pingvin have to enforce their own auth.
+1.  Authelia protects **three** routes — the homepage at `DOMAINNAME`, the traefik dashboard at
+    `traefik.DOMAINNAME` and dispatcharr at `dispatcharr.DOMAINNAME`. `jellyfin.`, `pingvin.`,
+    `static` (`.well-known`) and the `auth.` portal itself are public; jellyfin and pingvin have
+    to enforce their own auth.
 
 2.  The first login also enrols a TOTP device (the `totp` section is enabled), so have an
     authenticator app ready.
@@ -234,9 +236,13 @@ docker compose ps
 Order matters in one place: `traefik` needs `socket-proxy` (compose enforces it). `authelia`
 has no render step, it starts straight from the mounted config.
 
-The first visit to `https://dispatcharr.DOMAINNAME` creates the admin account. Dispatcharr
-only accepts that first-run POST from a private address by default; since traefik proxies
-from `10.120.0.0/24` that works out of the box. If it refuses, set
+Dispatcharr sits behind authelia, so the first visit redirects to `auth.DOMAINNAME` and the
+account setup happens after that login. It needs `DISPATCHARR_SECRET_KEY` in `.env` (mapped to
+`DJANGO_SECRET_KEY`): the image generates one into `/data` on first boot, but releases from
+0.13.1 on fail to start when a fresh volume has none.
+
+Dispatcharr only accepts the first-run account POST from a private address by default; since
+traefik proxies from `10.120.0.0/24` that works out of the box. If it refuses, set
 `DISPATCHARR_SETUP_ALLOWED_IP` to your public IP for the initial setup and remove it after.
 
 ### 6. Register the CrowdSec bouncer

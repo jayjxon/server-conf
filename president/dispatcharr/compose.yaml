@@ -12,6 +12,11 @@ services:
         environment:
             TZ: ${TZ}
 
+            # django signing key. the image can generate one into /data, but releases
+            # since 0.13.1 fail to boot when it is missing on a fresh volume, so it is
+            # supplied explicitly here
+            DJANGO_SECRET_KEY: ${DISPATCHARR_SECRET_KEY:?generate one, see the README}
+
             DISPATCHARR_ENV: aio
             REDIS_HOST: localhost
             CELERY_BROKER_URL: redis://localhost:6379/0
@@ -29,6 +34,7 @@ services:
         labels:
             traefik.enable: true
             traefik.http.routers.dispatcharr-rtr.rule: Host(`dispatcharr.${DOMAINNAME}`)
+            traefik.http.routers.dispatcharr-rtr.middlewares: middlewares-authelia@file
             traefik.http.services.dispatcharr-svc.loadbalancer.server.port: 9191
 
             homepage.group: media
