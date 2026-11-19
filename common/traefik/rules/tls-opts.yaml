@@ -15,7 +15,7 @@
 tls:
   options:
     tls-opts:
-      sniStrict: true
+      sniStrict: false # browsers coalesce sibling names onto one h2 connection (the wildcard cert covers them all); strict SNI answers those with 421
       minVersion: VersionTLS12
       cipherSuites:
         - TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
