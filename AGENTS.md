@@ -96,9 +96,13 @@ Two things that follow from this:
 ## Exit node
 
 The exit node runs with `network_mode: host` and `TS_USERSPACE=false`: userspace networking
-cannot forward packets, so it cannot act as an exit node. It needs `NET_ADMIN`, `NET_RAW` and
-`/dev/net/tun`, plus a Tailscale auth key. Advertising is not enough — the machine has to be
-approved in the tailnet, and the exit-node route enabled, before clients can select it.
+cannot forward packets, so it cannot act as an exit node. It needs `NET_ADMIN`, `NET_RAW`,
+`/dev/net/tun` and the host's `/lib/modules` (tailscaled creates its own iptables chains for
+forwarding, and without the modules it logs `modprobe: can't change directory` and every
+packet is dropped), plus a Tailscale auth key. Advertising is not enough — the machine has to
+be approved in the tailnet, and the exit-node route enabled, before clients can select it.
+Until the machine is approved the container exits and restarts in a loop; that is the image's
+auth flow, not a crash.
 
 ## Deploying
 

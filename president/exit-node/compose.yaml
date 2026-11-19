@@ -28,6 +28,11 @@ services:
             - ${APP_ROOT}/tailscale/cache:/var/cache/tailscale
             - /dev/net/tun:/dev/net/tun
 
+            # tailscaled builds its own iptables chains (ts-input/ts-forward) for
+            # exit-node forwarding; without the host modules iptables fails with
+            # "modprobe: can't change directory to '/lib/modules/...'"
+            - /lib/modules:/lib/modules:ro
+
         security_opt:
             - no-new-privileges:true
         pids_limit: 200
