@@ -11,9 +11,13 @@ services:
             - traefik
         expose:
             - 8080
-        environment:
-            # caddy renders {{env "DOMAINNAME"}} in the served files itself
-            DOMAINNAME: ${DOMAINNAME}
+        configs:
+            # both carry ${DOMAINNAME}: compose renders them, so neither a
+            # startup script nor a caddy template is needed
+            - source: well_known_matrix_client
+              target: /www/.well-known/matrix/client
+            - source: well_known_openid_configuration
+              target: /www/.well-known/openid-configuration
         volumes:
             - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
             - ./web:/www:ro
@@ -44,3 +48,26 @@ services:
 
             # define service properties
             traefik.http.services.error-pages-svc.loadbalancer.server.port: 8080
+
+configs:
+    well_known_matrix_client:
+        content: |
+            {
+                "m.homeserver": {
+                    "base_url": "https://matrix.${DOMAINNAME}"
+                },
+                "org.matrix.msc2965.authentication": {
+                    "issuer": "https://${DOMAINNAME}",
+                    "account": "https://matrix-auth.${DOMAINNAME}/account"
+                }
+            }
+    well_known_openid_configuration:
+        content: |
+            {
+                "issuer": "https://${DOMAINNAME}",
+                "authorization_endpoint": "https://matrix-auth.${DOMAINNAME}/authorize",
+                "token_endpoint": "https://matrix-auth.${DOMAINNAME}/oauth2/token",
+                "jwks_uri": "https://matrix-auth.${DOMAINNAME}/oauth2/keys.json",
+                "registration_endpoint": "https://matrix-auth.${DOMAINNAME}/oauth2/registration",
+                "introspection_endpoint": "https://matrix-auth.${DOMAINNAME}/oauth2/introspect"
+            }

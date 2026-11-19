@@ -1,9 +1,0 @@
-{
-    "m.homeserver": {
-        "base_url": "https://matrix.{{env `DOMAINNAME`}}"
-    },
-    "org.matrix.msc2965.authentication": {
-        "issuer": "https://{{env `DOMAINNAME`}}",
-        "account": "https://matrix-auth.{{env `DOMAINNAME`}}/account"
-    }
-}
