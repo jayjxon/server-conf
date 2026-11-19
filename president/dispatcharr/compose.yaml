@@ -34,8 +34,12 @@ services:
         labels:
             traefik.enable: true
             traefik.http.routers.dispatcharr-rtr.rule: Host(`dispatcharr.${DOMAINNAME}`)
-            traefik.http.routers.dispatcharr-rtr.middlewares: middlewares-authelia@file
+            traefik.http.routers.dispatcharr-rtr.middlewares: middlewares-authelia@file,dispatcharr-sso
             traefik.http.services.dispatcharr-svc.loadbalancer.server.port: 9191
+
+            # dispatcharr has no login of its own any more: whatever authelia let through
+            # arrives as this user. the header is set here, so a client cannot supply it
+            traefik.http.middlewares.dispatcharr-sso.headers.customrequestheaders.Remote-User: ${DISPATCHARR_SSO_USER:-admin}
 
             homepage.group: media
             homepage.name: Dispatcharr

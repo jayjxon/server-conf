@@ -269,14 +269,41 @@ docker compose ps
 Order matters in one place: `traefik` needs `socket-proxy` (compose enforces it). `authelia`
 has no render step, it starts straight from the mounted config.
 
-Dispatcharr sits behind authelia, so the first visit redirects to `auth.DOMAINNAME` and the
-account setup happens after that login. It needs `DISPATCHARR_SECRET_KEY` in `.env` (mapped to
+Dispatcharr sits behind authelia, so the first visit redirects to `auth.DOMAINNAME`. It keeps no
+login of its own: the router adds a `Remote-User` header, and dispatcharr exchanges that header
+for a session on every page load. It needs `DISPATCHARR_SECRET_KEY` in `.env` (mapped to
 `DJANGO_SECRET_KEY`): the image generates one into `/data` on first boot, but releases from
 0.13.1 on fail to start when a fresh volume has none.
 
-Dispatcharr only accepts the first-run account POST from a private address by default; since
-traefik proxies from `10.120.0.0/24` that works out of the box. If it refuses, set
-`DISPATCHARR_SETUP_ALLOWED_IP` to your public IP for the initial setup and remove it after.
+That hand-off needs one user and one settings row in dispatcharr's own database. Run this once
+after the stack is up (it is idempotent):
+
+```bash
+cd president
+docker exec -i dispatcharr python manage.py shell <<'PY'
+from django.contrib.auth import get_user_model
+from core.models import CoreSettings
+
+User = get_user_model()
+user, _ = User.objects.get_or_create(
+    username="admin", defaults={"is_staff": True, "is_superuser": True}
+)
+user.is_staff = user.is_superuser = True
+user.set_unusable_password()  # the only way in is authelia
+user.save()
+
+CoreSettings.objects.update_or_create(
+    key="reverse_proxy_auth",
+    defaults={"name": "Reverse Proxy Auth", "value": {"enabled": True, "header": "Remote-User"}},
+)
+print(list(User.objects.values_list("username", flat=True)))
+PY
+```
+
+The header value is `DISPATCHARR_SSO_USER` (default `admin`) and has to match that username;
+change the two together and recreate the container. The header is only believed when the
+request comes from `DISPATCHARR_TRUSTED_PROXIES` (`10.120.0.0/24`, traefik's subnet), and
+traefik overwrites it on the way in, so a client cannot set it for itself.
 
 ### 6. Register the CrowdSec bouncer
 
@@ -343,7 +370,7 @@ curl -sI https://DOMAINNAME | head -1             # 302 to auth.DOMAINNAME
 curl -sI https://jellyfin.DOMAINNAME | head -1    # 200/302 straight from jellyfin
 curl -sI https://pingvin.DOMAINNAME | head -1     # 200 straight from pingvin
 curl -s  https://auth.DOMAINNAME/api/health       # {"status":"OK"}
-curl -sI https://dispatcharr.DOMAINNAME | head -1 # 200/302, straight from dispatcharr
+curl -sI https://dispatcharr.DOMAINNAME | head -1 # 302 to auth.DOMAINNAME
 ```
 
 If traefik answers `404` for a host, the router label is wrong. If it answers `502`, the

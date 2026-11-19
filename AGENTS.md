@@ -114,6 +114,19 @@ Two things that follow from this:
 -   CrowdSec reads traefik's access log read-only and only logs the status classes it is
     configured for, so an empty log is not proof that traffic never arrived.
 
+## Dispatcharr
+
+-   It keeps no login of its own. The router carries authelia's forward-auth **plus** a headers
+    middleware that sets `Remote-User`; dispatcharr reads the `reverse_proxy_auth` CoreSettings
+    row (header `Remote-User`) and its SPA calls `POST /api/accounts/auth/proxy-login/` on load
+    to swap the header for a JWT.
+-   Both halves — the `admin` user (unusable password) and that settings row — are in
+    `${APP_ROOT}/dispatcharr/data`, i.e. host state rather than repo state. Rebuilding the
+    volume means rerunning the snippet in the README, not just pulling.
+-   The header is only honoured when the peer is in `DISPATCHARR_TRUSTED_PROXIES`; that is why
+    the compose file sets `10.120.0.0/24`. Traefik overwrites the header, so a client cannot
+    assert an identity of its own — the middleware, not the app, is the gate.
+
 ## Exit node
 
 The exit node runs with `network_mode: host` and `TS_USERSPACE=false`: userspace networking
