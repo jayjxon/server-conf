@@ -51,7 +51,8 @@ Everything in this section has to be done once, in order, before the first
     image's nftables chain only accepts 22, and published container ports are DNATed past
     that chain, so a closed security list looks like a silent connection timeout.
 -   **media**: `/dev/net/tun` must exist and the host must allow `NET_ADMIN` (needed by
-    `gluetun` and by both tailscale nodes).
+    `gluetun` and by both tailscale nodes). The president exit node needs `/dev/net/tun` and
+    `NET_ADMIN` as well.
 -   A Cloudflare API token with `Zone -> DNS -> Edit` and `Zone -> Zone -> Read` on the zone.
 -   DNS records (A/AAAA to the VPS): `DOMAINNAME` (apex), `auth.DOMAINNAME`,
     `traefik.DOMAINNAME`, `jellyfin.DOMAINNAME`, `pingvin.DOMAINNAME`,
@@ -86,6 +87,7 @@ cd ../media && cp example.env .env
 | `CROWDSEC_BOUNCER_LAPI_KEY` | yes | bouncer key, see step 6 |
 | `PINGVIN_STORAGE_SIZE_MEGABITS` | only for `setup.sh` | see step 4 |
 | `UPTIME_KUMA_SLUG` | no | extra homepage widget |
+| `TAILSCALE_EXIT_NODE_AUTHKEY` | only for the exit node | tailscale auth key, see the exit node section |
 
 Generate the authelia secrets:
 
@@ -131,7 +133,7 @@ president:
 
 ```bash
 cd president && . ./.env
-mkdir -p "$APP_ROOT"/{traefik/{data,logs,plugins},authelia/config,crowdsec/{config,data,logs},homepage/logs,jellyfin/{config,cache,media},dispatcharr/data,pingvin/{data,images,uploads/uploads}}
+mkdir -p "$APP_ROOT"/{traefik/{data,logs,plugins},authelia/config,crowdsec/{config,data,logs},homepage/logs,jellyfin/{config,cache,media},dispatcharr/data,pingvin/{data,images,uploads/uploads},tailscale/{data,cache}}
 chown -R "$PUID:$PGID" "$APP_ROOT"
 ```
 
@@ -335,12 +337,31 @@ Two rules keep it that way when adding services:
 | `${APP_ROOT}/dispatcharr/data` | plain bind mount at `/data` | `docker compose restart dispatcharr` |
 | `president/static/web/` | bind-mounted read-only, `{{env "DOMAINNAME"}}` expanded by caddy's `templates` directive | `docker compose restart static` |
 
+## Exit node
+
+`president/exit-node/` advertises the VPS as a regular Tailscale exit node, on Tailscale's own
+control plane. It is included by `president/compose.yaml`, so it starts with the rest of the
+stack; it only does something useful once it has a key:
+
+1.  create an auth key in the Tailscale admin console (`Settings` → `Keys`) and put it in
+    `president/.env` as `TAILSCALE_EXIT_NODE_AUTHKEY`;
+2.  `docker compose up -d tailscale-exit-node`;
+3.  approve it as an exit node: `Machines` → `outside` → `Edit route settings` → *Use as exit
+    node*.
+
+Clients then use `tailscale set --exit-node=outside` (add `--exit-node-allow-lan-access` if
+they should still reach their LAN).
+
+The container runs with `TS_USERSPACE=false` and `network_mode: host`: userspace networking
+cannot forward packets, so it cannot serve as an exit node, and host networking keeps the tun
+device and forwarding rules where the traffic leaves the machine. On Oracle Cloud, if clients
+get no connectivity through the node, check that the host forwards (`net.ipv4.ip_forward=1`)
+and that the VCN security list allows the outbound traffic — inbound 80/443 has nothing to do
+with it.
+
 ## Not deployed
 
 The files are kept in the repo but are **not** included by either `compose.yaml`:
-
--   `president/exit-node/` — was only a headscale exit node
-    (`TAILSCALE_EXIT_NODE_PREAUTH_KEY`).
 -   `media/frpc/` — its `frps` server was removed from `president/` (`FRP_OIDC_ISSUER`,
     `FRP_OIDC_AUDIENCE`, `FRP_OIDC_CLIENT_SECRET`, `FRP_OIDC_TOKEN_ENDPOINT`).
 -   `media/upload/` — only knows how to talk to `romm`, which was removed

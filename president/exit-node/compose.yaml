@@ -1,18 +1,32 @@
 services:
+    # advertises this host as a regular tailscale exit node, using tailscale's
+    # own control plane (no headscale, no --login-server)
     tailscale-exit-node:
         image: tailscale/tailscale:stable
         container_name: tailscale-exit-node
-        user: ${PUID}:${PGID}
+
+        # kernel networking: an exit node forwards packets, which userspace
+        # networking (TS_USERSPACE=true) cannot do. host networking keeps the
+        # tun device and the forwarding rules on the host, where the traffic
+        # actually leaves.
+        network_mode: host
+        cap_add:
+            - NET_ADMIN
+            - NET_RAW
+
         environment:
-            TS_EXTRA_ARGS: --advertise-tags=tag:internal --advertise-exit-node --login-server=https://headscale.${DOMAINNAME}
-            TS_AUTHKEY: ${TAILSCALE_EXIT_NODE_PREAUTH_KEY}
+            # auth key from the tailscale admin console, Settings -> Keys.
+            # without it the node starts but stays unauthenticated.
+            TS_AUTHKEY: ${TAILSCALE_EXIT_NODE_AUTHKEY:-}
+            TS_EXTRA_ARGS: --advertise-exit-node
             TS_HOSTNAME: outside
             TS_STATE_DIR: /var/lib/tailscale
-            TS_USERSPACE: true
-            HEADSCALE_HOST: headscale.${DOMAINNAME}
+            TS_USERSPACE: false
+
         volumes:
             - ${APP_ROOT}/tailscale/data:/var/lib/tailscale
             - ${APP_ROOT}/tailscale/cache:/var/cache/tailscale
+            - /dev/net/tun:/dev/net/tun
 
         security_opt:
             - no-new-privileges:true

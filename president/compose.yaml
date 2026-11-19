@@ -18,8 +18,8 @@ include:
     # abuse protection, reads the traefik access log
     - ./crowdsec/compose.yaml
 
-    # not deployed
-    # - ./exit-node/compose.yaml # only ever worked as a headscale exit node
+    # advertises this host as a tailscale exit node
+    - ./exit-node/compose.yaml
 
 networks:
     socket_proxy:
