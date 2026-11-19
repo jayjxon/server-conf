@@ -275,30 +275,12 @@ for a session on every page load. It needs `DISPATCHARR_SECRET_KEY` in `.env` (m
 `DJANGO_SECRET_KEY`): the image generates one into `/data` on first boot, but releases from
 0.13.1 on fail to start when a fresh volume has none.
 
-That hand-off needs one user and one settings row in dispatcharr's own database. Run this once
-after the stack is up (it is idempotent):
-
-```bash
-cd president
-docker exec -i dispatcharr python manage.py shell <<'PY'
-from django.contrib.auth import get_user_model
-from core.models import CoreSettings
-
-User = get_user_model()
-user, _ = User.objects.get_or_create(
-    username="admin", defaults={"is_staff": True, "is_superuser": True}
-)
-user.is_staff = user.is_superuser = True
-user.set_unusable_password()  # the only way in is authelia
-user.save()
-
-CoreSettings.objects.update_or_create(
-    key="reverse_proxy_auth",
-    defaults={"name": "Reverse Proxy Auth", "value": {"enabled": True, "header": "Remote-User"}},
-)
-print(list(User.objects.values_list("username", flat=True)))
-PY
-```
+That hand-off is automatic: `dispatcharr-init` in the compose file shares dispatcharr's network
+namespace (its postgres and redis live inside that container, so `localhost` is the only route to
+them), waits for the database, and ensures the `admin` user and the `reverse_proxy_auth` row
+exist. It runs on every `docker compose up -d`, does nothing once they are there, and exits 0. If
+it ever fails, `docker compose logs dispatcharr-init` says why. Without that user the UI serves
+the first-run setup page instead, which refuses connections from outside the local network.
 
 The header value is `DISPATCHARR_SSO_USER` (default `admin`) and has to match that username;
 change the two together and recreate the container. The header is only believed when the

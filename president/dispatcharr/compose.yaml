@@ -45,3 +45,78 @@ services:
             homepage.name: Dispatcharr
             homepage.icon: mdi-television-guide
             homepage.href: https://dispatcharr.${DOMAINNAME}
+
+    # dispatcharr keeps its postgres and redis inside its own container, so the only way to
+    # reach them is to borrow that container's network namespace. this waits for the
+    # database and makes sure the sso user and the reverse proxy auth setting exist, so a
+    # fresh volume never serves the first-run setup page. runs on every `up -d`, no-op after
+    # the first time
+    dispatcharr-init:
+        image: ghcr.io/dispatcharr/dispatcharr:latest
+        container_name: dispatcharr-init
+        network_mode: 'service:dispatcharr'
+        restart: 'no'
+        depends_on:
+            - dispatcharr
+        environment:
+            TZ: ${TZ}
+            DISPATCHARR_ENV: aio
+            DJANGO_SECRET_KEY: ${DISPATCHARR_SECRET_KEY:?generate one, see the README}
+            REDIS_HOST: localhost
+            DISPATCHARR_SSO_USER: ${DISPATCHARR_SSO_USER:-admin}
+        volumes:
+            - ${APP_ROOT}/dispatcharr/data:/data
+        entrypoint:
+            - python
+        command:
+            - /dispatcharr-init.py
+        configs:
+            - source: dispatcharr_init
+              target: /dispatcharr-init.py
+
+configs:
+    dispatcharr_init:
+        content: |
+            """One-shot bootstrap: the user dispatcharr signs everyone in as."""
+            import os
+            import sys
+            import time
+
+            os.environ.setdefault("DJANGO_SETTINGS_MODULE", "dispatcharr.settings")
+
+            import django
+
+            django.setup()
+
+            from django.contrib.auth import get_user_model
+
+            from core.models import CoreSettings
+
+            USERNAME = os.environ.get("DISPATCHARR_SSO_USER", "admin")
+
+            for _ in range(60):
+                try:
+                    User = get_user_model()
+                    user, _ = User.objects.get_or_create(
+                        username=USERNAME,
+                        defaults={"is_staff": True, "is_superuser": True},
+                    )
+                    user.is_staff = True
+                    user.is_superuser = True
+                    user.set_unusable_password()
+                    user.save()
+                    CoreSettings.objects.update_or_create(
+                        key="reverse_proxy_auth",
+                        defaults={
+                            "name": "Reverse Proxy Auth",
+                            "value": {"enabled": True, "header": "Remote-User"},
+                        },
+                    )
+                    print("dispatcharr-init: ready as", USERNAME)
+                    sys.exit(0)
+                except Exception as exc:
+                    print("dispatcharr-init: waiting for the database:", type(exc).__name__)
+                    time.sleep(3)
+
+            print("dispatcharr-init: the database never became ready", file=sys.stderr)
+            sys.exit(1)
