@@ -185,10 +185,11 @@ docker run --rm authelia/authelia:4.39.28 \
 The quoting matters: compose interpolates `.env` values, so an unquoted
 `$argon2id$v=19$...` loses everything after the first `$`. Single quotes (or doubling every
 `$`) keep it intact. To change the password later, regenerate the hash and recreate the
-container:
+container — a plain `up -d` leaves it on the config it was created with, so the new hash is
+only picked up by a recreate:
 
 ```bash
-docker compose up -d authelia
+docker compose up -d --force-recreate authelia
 ```
 
 1.  Authelia only protects **two** routes — the homepage at `DOMAINNAME` and the traefik
@@ -331,8 +332,8 @@ Two rules keep it that way when adding services:
 | Config | How it gets in | To apply a change |
 | --- | --- | --- |
 | `president/homepage/config/` | mounted straight onto `/app/config` | `docker compose restart homepage` |
-| `president/authelia/config/configuration.yml` | bind-mounted read-only, `${...}` expanded by authelia | `docker compose up -d authelia` |
-| `AUTHELIA_ADMIN_PASSWORD_HASH` in `.env` | becomes `/config/users_database.yml` through a compose config, see step 3 | `docker compose up -d authelia` |
+| `president/authelia/config/configuration.yml` | bind-mounted read-only, `${...}` expanded by authelia | `docker compose up -d --force-recreate authelia` |
+| `AUTHELIA_ADMIN_PASSWORD_HASH` in `.env` | becomes `/config/users_database.yml` through a compose config, see step 3 | `docker compose up -d --force-recreate authelia` |
 | `president/crowdsec/config/` | mounted as-is (acquis + whitelist) | `docker compose restart crowdsec` |
 | `${APP_ROOT}/dispatcharr/data` | plain bind mount at `/data` | `docker compose restart dispatcharr` |
 | `president/static/web/` | bind-mounted read-only, `{{env "DOMAINNAME"}}` expanded by caddy's `templates` directive | `docker compose restart static` |
