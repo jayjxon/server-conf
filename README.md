@@ -138,7 +138,7 @@ president:
 
 ```bash
 cd president && . ./.env
-mkdir -p "$APP_ROOT"/{traefik/{data,logs,plugins},authelia/config,crowdsec/{config,data,logs},homepage/logs,jellyfin/{config,cache,media},dispatcharr/data,pingvin/{data,images,uploads/uploads},tailscale/{data,cache}}
+mkdir -p "$APP_ROOT"/{traefik/{data,logs,plugins},authelia/config,crowdsec/{config,data,logs},homepage/logs,jellyfin/{config,cache,media},dispatcharr/{data,vods},pingvin/{data,images,uploads/uploads},tailscale/{data,cache}}
 chown -R "$PUID:$PGID" "$APP_ROOT"
 ```
 

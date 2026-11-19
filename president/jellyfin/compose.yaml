@@ -15,6 +15,9 @@ services:
             # no /dev/dri and no GPU reservation: this host is a VPS without
             # hardware transcoding, the library lives under APP_ROOT instead
             - ${APP_ROOT}/jellyfin/media:/data
+            # dispatcharr's generated VOD library (one .strm per title), read-only so a
+            # jellyfin scan can never touch the plugin's output
+            - ${APP_ROOT}/dispatcharr/vods:/data/vods:ro
         expose:
             - 8096
         networks:
