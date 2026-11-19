@@ -5,6 +5,17 @@ services:
         image: tailscale/tailscale:stable
         container_name: tailscale-exit-node
 
+        # alpine links iptables to iptables-legacy, which cannot create its tables
+        # here: a container may not load kernel modules, and this host uses
+        # nf_tables anyway. point the symlinks at the nft backend, which talks to
+        # the host's ruleset, then hand over to the image's own startup.
+        entrypoint: ["/bin/sh", "-c"]
+        command:
+            - |
+              ln -sf /usr/sbin/iptables-nft /usr/sbin/iptables
+              ln -sf /usr/sbin/ip6tables-nft /usr/sbin/ip6tables
+              exec /usr/local/bin/containerboot
+
         # kernel networking: an exit node forwards packets, which userspace
         # networking (TS_USERSPACE=true) cannot do. host networking keeps the
         # tun device and the forwarding rules on the host, where the traffic
