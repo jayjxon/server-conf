@@ -82,6 +82,9 @@ configs:
             import sys
             import time
 
+            # a script's own directory is sys.path[0], not the workdir, so the app package
+            # has to be added explicitly
+            sys.path.insert(0, "/app")
             os.environ.setdefault("DJANGO_SETTINGS_MODULE", "dispatcharr.settings")
 
             import django
