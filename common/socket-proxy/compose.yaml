@@ -5,14 +5,16 @@
 name: socket-proxy # Project Name
 services:
     socket-proxy:
-        image: tecnativa/docker-socket-proxy:0.3.0
+        image: tecnativa/docker-socket-proxy:3.4
         container_name: socket-proxy
         restart: unless-stopped
         security_opt:
             - no-new-privileges=true
         networks:
             - socket_proxy
-        privileged: true # true for VM.  false for unprivileged LXC container.
+        # socket-proxy needs the docker socket only; running it privileged grants
+        # every host device and capability for no reason
+        # privileged: true # uncomment only if running in a VM without socket access
         #depends_on:
         #  - traefik
         environment:
@@ -53,14 +55,16 @@ services:
             com.centurylinklabs.watchtower.enable: false
 
     socket-proxy-writable:
-        image: tecnativa/docker-socket-proxy:0.3.0
+        image: tecnativa/docker-socket-proxy:3.4
         container_name: socket-proxy-writable
         restart: unless-stopped
         security_opt:
             - no-new-privileges=true
         networks:
             - socket_proxy_writable
-        privileged: true # true for VM.  false for unprivileged LXC container.
+        # socket-proxy needs the docker socket only; running it privileged grants
+        # every host device and capability for no reason
+        # privileged: true # uncomment only if running in a VM without socket access
         #depends_on:
         #  - traefik
         environment:

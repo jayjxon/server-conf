@@ -1,4 +1,4 @@
-FROM alpine:3.16.0
+FROM alpine:3.24.4
 
 ARG ARIANG_VERSION
 ARG BUILD_DATE
@@ -25,7 +25,7 @@ RUN apk update \
 # AriaNG
 WORKDIR /usr/local/www/ariang
 
-RUN wget --no-check-certificate https://github.com/mayswind/AriaNg/releases/download/${ARIANG_VERSION}/AriaNg-${ARIANG_VERSION}.zip \
+RUN wget https://github.com/mayswind/AriaNg/releases/download/${ARIANG_VERSION}/AriaNg-${ARIANG_VERSION}.zip \
     -O ariang.zip \
     && unzip ariang.zip \
     && rm ariang.zip \

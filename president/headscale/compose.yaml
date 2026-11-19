@@ -1,6 +1,6 @@
 services:
     headscale:
-        image: headscale/headscale:0.26.0
+        image: headscale/headscale:0.29.7
         container_name: headscale
         user: ${PUID}:${PGID}
         security_opt:
@@ -38,7 +38,7 @@ services:
             me.tale.headplane.target: headscale
 
     headplane:
-        image: ghcr.io/tale/headplane:0.6.0
+        image: ghcr.io/tale/headplane:0.8.2
         user: ${PUID}:${PGID}
         security_opt:
             - no-new-privileges:true

@@ -41,7 +41,7 @@ transport.maxPoolCount = 5
 # transport.tcpKeepalive = 7200
 
 # transport.tls.force specifies whether to only accept TLS-encrypted connections. By default, the value is false.
-transport.tls.force = false
+transport.tls.force = true
 
 # webServer.addr = "127.0.0.1"
 # webServer.port = 7500
