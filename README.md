@@ -82,6 +82,7 @@ cd ../media && cp example.env .env
 | `CF_API_EMAIL` | yes | Cloudflare account email |
 | `CF_DNS_API_TOKEN` | yes | token described above |
 | `DISPATCHARR_SECRET_KEY` | yes | Django signing key, 50+ random alphanumerics (`openssl rand -hex 32`) |
+| `DISPATCHARR_SSO_USER` | no | dispatcharr user everyone signs in as, defaults to `admin` |
 | `AUTHELIA_OIDC_HMAC_SECRET` | yes | hmac key for authelia's oidc provider |
 | `PINGVIN_OIDC_CLIENT_SECRET` | yes | plaintext client secret handed to pingvin |
 | `PINGVIN_OIDC_CLIENT_SECRET_HASH` | yes | pbkdf2 hash of the same secret, single-quoted |
@@ -227,9 +228,13 @@ file exists, pingvin's admin UI is read-only for those keys — change the value
 `president/pingvin/compose.yaml` and recreate the container instead.
 
 1.  Authelia protects **three** routes — the homepage at `DOMAINNAME`, the traefik dashboard at
-    `traefik.DOMAINNAME` and dispatcharr at `dispatcharr.DOMAINNAME`. `jellyfin.`, `pingvin.`,
-    `static` (`.well-known`) and the `auth.` portal itself are public; jellyfin enforces its own
-    auth and pingvin signs in through authelia's OIDC provider.
+    `traefik.DOMAINNAME` and dispatcharr at `dispatcharr.DOMAINNAME`. Dispatcharr is narrower
+    than the other two: its access-control rule requires the `admins` group, so any other
+    authelia user is refused with 403. That group is the `groups:` list on the user in
+    `president/authelia/compose.yaml`.
+
+    `jellyfin.`, `pingvin.`, `static` (`.well-known`) and the `auth.` portal itself are public;
+    jellyfin enforces its own auth and pingvin signs in through authelia's OIDC provider.
 
 2.  The first login also enrols a TOTP device (the `totp` section is enabled), so have an
     authenticator app ready.
@@ -288,6 +293,13 @@ request comes from `DISPATCHARR_TRUSTED_PROXIES` (`10.120.0.0/24`, traefik's sub
 traefik overwrites it on the way in, so a client cannot set it for itself.
 
 ### 6. Register the CrowdSec bouncer
+
+**CrowdSec is currently disabled.** Its `include:` in `president/compose.yaml` is commented out
+and `middlewares-crowdsec@file` is not in the traefik entrypoint chain, because the
+`crowdsecurity/http-probing` scenario banned the owner's own address over dispatcharr's 404
+artwork responses (`/api/vod/vodlogos/<id>/cache/`). Nothing was deleted: the config, the
+plugin and the decision database are untouched, so re-enabling is the two commented lines. The
+rest of this section is what that re-enabling looks like.
 
 The traefik plugin is enabled and the bouncer middleware is applied to the `websecure`
 entrypoint, but it needs an API key before it can read decisions:

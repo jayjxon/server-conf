@@ -32,9 +32,10 @@ services:
             # create it once with: docker compose exec crowdsec cscli bouncers add traefik-bouncer
             CROWDSEC_API_KEY: ${CROWDSEC_BOUNCER_LAPI_KEY:?needs a crowdsec bouncer key}
 
-            # bans are applied on every route, including the ones without authelia
+            # bans used to be applied on every route, including the ones without authelia.
+            # crowdsec is disabled for now (see the include in president/compose.yaml):
+            # append middlewares-crowdsec@file back here to re-enable the bouncer
             TRAEFIK_ENTRYPOINTS_WEBSECURE_HTTP_MIDDLEWARES: >-
                 middlewares-rate-limit@file,
                 middlewares-compress@file,
-                middlewares-secure-headers@file,
-                middlewares-crowdsec@file
+                middlewares-secure-headers@file

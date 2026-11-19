@@ -54,6 +54,13 @@ access_control:
         - domain: 'auth.${DOMAINNAME}'
           policy: 'bypass'
 
+        # dispatcharr is for the admin account only. anyone else who passes the first
+        # factor is refused with 403 here, before the request reaches the app
+        - domain: 'dispatcharr.${DOMAINNAME}'
+          policy: 'one_factor'
+          subject:
+              - 'group:admins'
+
 identity_providers:
     oidc:
         # hmac_secret and issuer_private_key are not in this file: they arrive as

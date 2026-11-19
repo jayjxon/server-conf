@@ -103,6 +103,13 @@ Two things that follow from this:
 
 ## Traefik and CrowdSec
 
+-   CrowdSec is **disabled** right now: the `include:` in `president/compose.yaml` is commented
+    out and `middlewares-crowdsec@file` is absent from
+    `TRAEFIK_ENTRYPOINTS_WEBSECURE_HTTP_MIDDLEWARES`. Its `crowdsecurity/http-probing` scenario
+    banned the owner's own address because dispatcharr answers 404 for uncached artwork
+    (`/api/vod/vodlogos/<id>/cache/`), so enforcement was turned off instead of tuned. Config,
+    plugin and the decision database are untouched; restoring the two lines re-enables it.
+
 -   The bouncer plugin (`maxlerebourg/crowdsec-bouncer-traefik-plugin`) is downloaded from the
     catalogue on first start and cached in `APP_ROOT/traefik/plugins`; without egress traefik
     will not start.
@@ -129,6 +136,9 @@ Two things that follow from this:
 -   The header is only honoured when the peer is in `DISPATCHARR_TRUSTED_PROXIES`; that is why
     the compose file sets `10.120.0.0/24`. Traefik overwrites the header, so a client cannot
     assert an identity of its own — the middleware, not the app, is the gate.
+-   Because everyone arrives as that one account, access is limited in authelia: its
+    access-control rule for `dispatcharr.DOMAINNAME` carries `subject: group:admins`. A user
+    outside the group gets a 403 from the portal and never reaches the app.
 
 ## Exit node
 

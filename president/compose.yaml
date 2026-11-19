@@ -15,8 +15,10 @@ include:
     - ./pingvin/compose.yaml
     - ./static/compose.yaml
 
-    # abuse protection, reads the traefik access log
-    - ./crowdsec/compose.yaml
+    # abuse protection, reads the traefik access log.
+    # disabled for now: its http-probing scenario banned the owner's own address over
+    # dispatcharr's 404 artwork paths. uncomment to bring the service back
+    # - ./crowdsec/compose.yaml
 
     # advertises this host as a tailscale exit node
     - ./exit-node/compose.yaml
