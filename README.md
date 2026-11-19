@@ -80,8 +80,7 @@ cd ../media && cp example.env .env
 | `APP_ROOT` | yes | absolute path to the private app data on the VPS |
 | `CF_API_EMAIL` | yes | Cloudflare account email |
 | `CF_DNS_API_TOKEN` | yes | token described above |
-| `AUTHELIA_ADMIN_PASSWORD` | yes | authelia admin password in plain text, hashed at render time (step 3) |
-| `AUTHELIA_ADMIN_USER` / `AUTHELIA_ADMIN_EMAIL` | no | default `admin` / `admin@DOMAINNAME` |
+| `AUTHELIA_ADMIN_PASSWORD_HASH` | yes | argon2id digest of the admin password, single-quoted (step 3) |
 | `AUTHELIA_SESSION_SECRET` | yes | 32+ random bytes, hex |
 | `AUTHELIA_STORAGE_ENCRYPTION_KEY` | yes | 32+ random bytes, hex |
 | `CROWDSEC_BOUNCER_LAPI_KEY` | yes | bouncer key, see step 6 |
@@ -93,8 +92,9 @@ Generate the authelia secrets:
 ```bash
 echo "AUTHELIA_SESSION_SECRET=$(openssl rand -hex 32)" >> .env
 echo "AUTHELIA_STORAGE_ENCRYPTION_KEY=$(openssl rand -hex 32)" >> .env
-echo "AUTHELIA_ADMIN_PASSWORD=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9')" >> .env
 ```
+
+`AUTHELIA_ADMIN_PASSWORD_HASH` is generated in step 3, it needs the password itself.
 
 #### media/.env
 
@@ -131,7 +131,7 @@ president:
 
 ```bash
 cd president && . ./.env
-mkdir -p "$APP_ROOT"/{traefik/{data,logs,plugins},authelia/config,crowdsec/{config,data,logs},homepage/logs,jellyfin/{config,cache,media},dispatcharr/data,pingvin/{data,images,uploads/uploads},static/templates}
+mkdir -p "$APP_ROOT"/{traefik/{data,logs,plugins},authelia/config,crowdsec/{config,data,logs},homepage/logs,jellyfin/{config,cache,media},dispatcharr/data,pingvin/{data,images,uploads/uploads}}
 chown -R "$PUID:$PGID" "$APP_ROOT"
 ```
 
@@ -146,8 +146,9 @@ chown -R "$PUID:$PGID" "$APP_ROOT" "$DATA_MOUNT_DIR" "$QBITTORRENT_INCOMPLETE_MO
 
 Notes:
 
--   `${APP_ROOT}/authelia/config` holds the rendered authelia config and your users database.
-    The sidecar writes into it, so it must stay writable by `PUID`.
+-   `${APP_ROOT}/authelia/config` holds authelia's state (`db.sqlite3`, `notifications.txt`).
+    The configuration and the users database are mounted in from the repo, so only the state
+    lives here, and it must stay writable by `PUID`.
 -   `${APP_ROOT}/crowdsec/{config,data,logs}` is populated by the crowdsec image on first start.
     crowdsec runs as root (the image bootstraps its config with `rsync` from a root-owned
     `/staging`), so those directories only need to be writable by root.
@@ -158,24 +159,34 @@ Notes:
 
 ### 3. Configure Authelia
 
-Both files authelia needs are rendered by `president/authelia/container/init.sh`, which the
-`authelia-config` sidecar runs on every `docker compose up -d`:
+Authelia reads its configuration straight out of the repo, there is no render step:
 
--   `configuration.yml`, from `president/authelia/config/configuration.template.yml`;
--   `users_database.yml`, holding the `admin` user with `AUTHELIA_ADMIN_PASSWORD` from `.env`
-    hashed to argon2id at render time.
+-   `president/authelia/config/configuration.yml` is mounted read-only at
+    `/config/configuration.yml`, and authelia expands its `${...}` placeholders itself
+    (`X_AUTHELIA_CONFIG_FILTERS=expand-env`);
+-   the session secret and the storage encryption key are set through authelia's own
+    environment variables, `AUTHELIA_SESSION_SECRET` and
+    `AUTHELIA_STORAGE_ENCRYPTION_KEY`;
+-   `/config/users_database.yml` is a compose config built from
+    `AUTHELIA_ADMIN_PASSWORD_HASH`, i.e. the `admin` user with `admin@DOMAINNAME` in `admins`.
 
-That is the whole configuration step: set the password, no hash is ever committed.
-`AUTHELIA_ADMIN_USER` and `AUTHELIA_ADMIN_EMAIL` optionally override the account name and
-address (defaults `admin` and `admin@DOMAINNAME`).
-
-Both rendered files are overwritten on every run, so edit the templates in the repo, never the
-copies in `APP_ROOT`. To re-apply without touching anything else (after changing the password,
-for example):
+Generate the digest and append it to `.env` in **single quotes**:
 
 ```bash
-docker compose run --rm authelia-config
-docker compose restart authelia
+cd president
+docker run --rm authelia/authelia:4.39.28 \
+    authelia crypto hash generate argon2 --password 'your-password' |
+    sed -n 's/^Digest: //p' |
+    xargs -I{} echo "AUTHELIA_ADMIN_PASSWORD_HASH='{}'" >> .env
+```
+
+The quoting matters: compose interpolates `.env` values, so an unquoted
+`$argon2id$v=19$...` loses everything after the first `$`. Single quotes (or doubling every
+`$`) keep it intact. To change the password later, regenerate the hash and recreate the
+container:
+
+```bash
+docker compose up -d authelia
 ```
 
 1.  Authelia only protects **two** routes — the homepage at `DOMAINNAME` and the traefik
@@ -217,8 +228,8 @@ docker compose up -d
 docker compose ps
 ```
 
-Order matters elsewhere in two places: `traefik` needs `socket-proxy` (compose enforces it),
-and `authelia` waits for the `authelia-config` renderer to exit successfully.
+Order matters in one place: `traefik` needs `socket-proxy` (compose enforces it). `authelia`
+has no render step, it starts straight from the mounted config.
 
 The first visit to `https://dispatcharr.DOMAINNAME` creates the admin account. Dispatcharr
 only accepts that first-run POST from a private address by default; since traefik proxies
@@ -318,11 +329,11 @@ Two rules keep it that way when adding services:
 | Config | How it gets in | To apply a change |
 | --- | --- | --- |
 | `president/homepage/config/` | mounted straight onto `/app/config` | `docker compose restart homepage` |
-| `president/authelia/config/configuration.template.yml` | rendered by `authelia-config` on every `up` | `docker compose run --rm authelia-config` |
-| `president/authelia/config/` (users database) | generated from `AUTHELIA_ADMIN_PASSWORD` by `authelia-config`, see step 3 | `docker compose run --rm authelia-config && docker compose restart authelia` |
+| `president/authelia/config/configuration.yml` | bind-mounted read-only, `${...}` expanded by authelia | `docker compose up -d authelia` |
+| `AUTHELIA_ADMIN_PASSWORD_HASH` in `.env` | becomes `/config/users_database.yml` through a compose config, see step 3 | `docker compose up -d authelia` |
 | `president/crowdsec/config/` | mounted as-is (acquis + whitelist) | `docker compose restart crowdsec` |
 | `${APP_ROOT}/dispatcharr/data` | plain bind mount at `/data` | `docker compose restart dispatcharr` |
-| `president/static/web/` | rendered into `${APP_ROOT}/static/templates` by `president/static/container/init.sh` | `docker compose restart static` |
+| `president/static/web/` | bind-mounted read-only, `{{env "DOMAINNAME"}}` expanded by caddy's `templates` directive | `docker compose restart static` |
 
 ## Not deployed
 

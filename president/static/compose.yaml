@@ -12,16 +12,11 @@ services:
         expose:
             - 8080
         environment:
+            # caddy renders {{env "DOMAINNAME"}} in the served files itself
             DOMAINNAME: ${DOMAINNAME}
         volumes:
-            - ./config/Caddyfile:/etc/caddy/Caddyfile
-            - ./web:/www-template
-
-            - ${APP_ROOT}/static/templates:/var/www
-
-            - ./container/init.sh:/usr/local/bin/init.sh
-
-        entrypoint: ["/bin/sh", "/usr/local/bin/init.sh"]
+            - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
+            - ./web:/www:ro
 
         labels:
             traefik.enable: true

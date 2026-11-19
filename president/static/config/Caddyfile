@@ -8,7 +8,14 @@
         header Access-Control-Allow-Origin "*"
         header Access-Control-Allow-Methods "OPTIONS,GET"
 
-        root * /var/www
+        root * /www
+
+        # lets the .well-known files use {{env "DOMAINNAME"}} instead of
+        # being rendered into place by a script before caddy starts
+        templates {
+            mime application/json
+        }
+
         file_server
     }
     respond "404 not found" 404
