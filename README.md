@@ -292,6 +292,48 @@ change the two together and recreate the container. The header is only believed 
 request comes from `DISPATCHARR_TRUSTED_PROXIES` (`10.120.0.0/24`, traefik's subnet), and
 traefik overwrites it on the way in, so a client cannot set it for itself.
 
+#### Showing VOD in jellyfin
+
+Jellyfin's Live TV tuner (HDHR/M3U) only carries dispatcharr's channels — it cannot read the XC
+API, so VOD reaches jellyfin as a **STRM library**. The `VOD to Media Library` plugin
+(`vod2mlib`, shipped in dispatcharr's plugin catalogue) writes one small `.strm` file per
+movie/episode and jellyfin scans that folder as ordinary Movies and Shows libraries.
+
+Both containers mount the same host directory: `${APP_ROOT}/dispatcharr/vods` is `/VODS` in
+dispatcharr (read-write, the plugin writes there) and `/data/vods` in jellyfin (read-only, so a
+scan can never touch the plugin's output). Those mounts are already in the compose files, so
+recreate the two containers once and make the folder readable:
+
+```bash
+cd president
+docker compose up -d dispatcharr jellyfin
+chmod -R a+r "$APP_ROOT/dispatcharr/vods"
+```
+
+Then:
+
+1.  Dispatcharr → Plugins → Find Plugins → **VOD to Media Library** → Install → Enable.
+2.  Settings: Movies root `/VODS/Movies`, Series root `/VODS/Series`, and **Dispatcharr URL
+    `http://dispatcharr:9191`**. Jellyfin loads the same docker network, while the public
+    `https://dispatcharr.DOMAINNAME` is answered with authelia's 302 and plays nothing. The
+    plugin refuses `localhost` for the same reason.
+3.  `[LIBRARY] Catalogue snapshot`, then `[GENERATE] Movies` with the batch size at 10 for a
+    first look. Files already generated are skipped on later runs.
+4.  Jellyfin → Dashboard → Libraries → add **Movies** at `/data/vods/Movies` and **Shows** at
+    `/data/vods/Series`. Untick the metadata downloaders and image fetchers on both *before*
+    the first scan: the plugin's NFOs already carry the metadata and a large catalogue
+    otherwise pulls tens of GB of artwork.
+
+Two limits worth knowing before turning it loose on the whole catalogue:
+
+-   series import but do not play: `/proxy/vod/episode/...` reaches the provider's series node,
+    which answers `400` for every `.mkv`, while movies stream normally. That is upstream of
+    the gateway, not a docker or authelia problem.
+-   dispatcharr regenerates VOD UUIDs on every M3U refresh, which orphans the URLs inside
+    already-generated `.strm` files. Keep the plugin's `?stream_id=` pinning on, run
+    `[GENERATE] Full rescan` after a provider refresh, and give the auto-rescan cron a nightly
+    slot.
+
 ### 6. Register the CrowdSec bouncer
 
 **CrowdSec is currently disabled.** Its `include:` in `president/compose.yaml` is commented out
@@ -396,6 +438,7 @@ Two rules keep it that way when adding services:
 | `AUTHELIA_ADMIN_PASSWORD_HASH` in `.env` | becomes `/config/users_database.yml` through a compose config, see step 3 | `docker compose up -d --force-recreate authelia` |
 | `president/crowdsec/config/` | mounted as-is (acquis + whitelist) | `docker compose restart crowdsec` |
 | `${APP_ROOT}/dispatcharr/data` | plain bind mount at `/data` | `docker compose restart dispatcharr` |
+| `${APP_ROOT}/dispatcharr/vods` | VOD `.strm` tree, `/VODS` in dispatcharr and `/data/vods:ro` in jellyfin | `docker compose up -d dispatcharr jellyfin` |
 | `president/static/web/` | bind-mounted read-only, `{{env "DOMAINNAME"}}` expanded by caddy's `templates` directive | `docker compose restart static` |
 | `president/pingvin/compose.yaml` (configs) | rendered to `/opt/app/config.yaml`, oidc included | `docker compose up -d --force-recreate pingvin-share` |
 
