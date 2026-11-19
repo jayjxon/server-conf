@@ -13,11 +13,12 @@ services:
             - 8080
         configs:
             # both carry ${DOMAINNAME}: compose renders them, so neither a
-            # startup script nor a caddy template is needed
+            # startup script nor a caddy template is needed. They are mounted on
+            # the container's own filesystem because /www is read-only.
             - source: well_known_matrix_client
-              target: /www/.well-known/matrix/client
+              target: /srv/well-known/.well-known/matrix/client
             - source: well_known_openid_configuration
-              target: /www/.well-known/openid-configuration
+              target: /srv/well-known/.well-known/openid-configuration
         volumes:
             - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
             - ./web:/www:ro

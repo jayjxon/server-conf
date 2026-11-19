@@ -4,6 +4,15 @@
 }
 
 :8080 {
+    # the well-known files are compose configs, rendered from ${DOMAINNAME}
+    handle /.well-known/* {
+        header Access-Control-Allow-Origin "*"
+        header Access-Control-Allow-Methods "OPTIONS,GET"
+
+        root * /srv/well-known
+        file_server
+    }
+
     handle {
         header Access-Control-Allow-Origin "*"
         header Access-Control-Allow-Methods "OPTIONS,GET"
@@ -11,5 +20,6 @@
         root * /www
         file_server
     }
+
     respond "404 not found" 404
 }
