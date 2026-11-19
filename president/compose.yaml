@@ -2,29 +2,27 @@ include:
     # common
     - ../common/socket-proxy/compose.yaml
 
-    # traefik and watchtower cuz they're special
+    # traefik first, everything else hangs off it
     - ./traefik/compose.yaml
-    - ./watchtower/compose.yaml
 
-    # more specials
+    # auth + dashboard
+    - ./authelia/compose.yaml
     - ./homepage/compose.yaml
-    - ./headscale/compose.yaml
-    - ./exit-node/compose.yaml
-    - ./frps/compose.yaml
-    - ./actual-budget/compose.yaml
-    - ./authentik/compose.yaml
-    - ./matrix/compose.yaml
-    - ./static/compose.yaml
-    - ./mealie/compose.yaml
+
+    # services
+    - ./jellyfin/compose.yaml
+    - ./dispatcharr/compose.yaml
     - ./pingvin/compose.yaml
-    - ./immich/compose.yaml
-    # - ./crowdsec/compose.yaml
+    - ./static/compose.yaml
+
+    # abuse protection, reads the traefik access log
+    - ./crowdsec/compose.yaml
+
+    # not deployed
+    # - ./exit-node/compose.yaml # only ever worked as a headscale exit node
 
 networks:
     socket_proxy:
-        driver: bridge
-
-    socket_proxy_writable:
         driver: bridge
 
     traefik:
@@ -33,6 +31,3 @@ networks:
         ipam:
             config:
                 - subnet: 10.120.0.0/24
-
-    headscale:
-        driver: bridge

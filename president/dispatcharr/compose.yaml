@@ -1,0 +1,37 @@
+services:
+    dispatcharr:
+        # all-in-one image: postgres, redis, nginx and the app all live in this container,
+        # so it has no dependency on anything outside the VPS
+        image: ghcr.io/dispatcharr/dispatcharr:latest
+        container_name: dispatcharr
+        restart: unless-stopped
+        security_opt:
+            - no-new-privileges:true
+        # it spawns uwsgi, celery and ffmpeg workers per active stream
+        pids_limit: 400
+        environment:
+            TZ: ${TZ}
+
+            DISPATCHARR_ENV: aio
+            REDIS_HOST: localhost
+            CELERY_BROKER_URL: redis://localhost:6379/0
+            DISPATCHARR_LOG_LEVEL: info
+
+            # traefik terminates TLS and proxies from the traefik network, so trust only
+            # that subnet for X-Forwarded-* (reverse proxy auth needs this set explicitly)
+            DISPATCHARR_TRUSTED_PROXIES: 10.120.0.0/24
+        volumes:
+            - ${APP_ROOT}/dispatcharr/data:/data
+        expose:
+            - 9191
+        networks:
+            - traefik
+        labels:
+            traefik.enable: true
+            traefik.http.routers.dispatcharr-rtr.rule: Host(`dispatcharr.${DOMAINNAME}`)
+            traefik.http.services.dispatcharr-svc.loadbalancer.server.port: 9191
+
+            homepage.group: media
+            homepage.name: Dispatcharr
+            homepage.icon: mdi-television-guide
+            homepage.href: https://dispatcharr.${DOMAINNAME}

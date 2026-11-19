@@ -10,25 +10,337 @@ and is pretty much only used for exposing the services I run on my local machine
 On the VPS, I have the following services running:
 
 -   [x] Traefik
--   [x] Watchtower
--   [x] Authentik
--   [x] Headscale
--   [x] Exit node for Headscale
--   [x] frps setup for hoisting local services
--   [x] Uptime Kuma
--   [x] Homepage that interfaces with the local services
--   [ ] Mattermost
+-   [x] Authelia
+-   [x] Homepage
+-   [x] Jellyfin
+-   [x] Dispatcharr
+-   [x] Pingvin Share
+-   [x] Static site
+-   [x] CrowdSec
 
 On the local machine, I have the following services running:
 
 -   [x] Traefik
--   [x] Watchtower
--   [x] frpc setup for accessing the local services from the internet
 -   [x] qbittorrent (& gluetun)
--   [x] Jellyfin
--   [x]
--   [x] autobrr
--   [x] cross-seed
--   [x] Prowlarr
+-   [x] aria2
 -   [x] Sonarr
 -   [x] Radarr
+-   [x] Prowlarr
+-   [x] flaresolverr
+-   [x] cross-seed
+
+## Repository layout
+
+-   `president/` — the public VPS stack (traefik, authelia, homepage, jellyfin, pingvin, static, crowdsec)
+-   `media/` — the home server stack (traefik + tailscale nodes, *arrs, qbittorrent/gluetun, aria2, cross-seed)
+-   `common/` — socket proxy and traefik definitions shared by both stacks
+-   everything outside `president/` and `media/` at the top level is docs or devenv plumbing
+
+## Before you deploy
+
+Everything in this section has to be done once, in order, before the first
+`docker compose up -d`.
+
+### 0. Host requirements
+
+-   Docker Engine with Compose v2 (`docker compose version` must work). The configs
+    use `include:`, which needs Compose >= 2.20.
+-   **president**: a public IP with **TCP 80 and 443** reachable. 80 is only used for the
+    http -> https redirect; certificates are issued with the Cloudflare **DNS-01** challenge.
+    On Oracle Cloud this also means opening 80/443 in the **VCN security list**: the stock
+    image's nftables chain only accepts 22, and published container ports are DNATed past
+    that chain, so a closed security list looks like a silent connection timeout.
+-   **media**: `/dev/net/tun` must exist and the host must allow `NET_ADMIN` (needed by
+    `gluetun` and by both tailscale nodes).
+-   A Cloudflare API token with `Zone -> DNS -> Edit` and `Zone -> Zone -> Read` on the zone.
+-   DNS records (A/AAAA to the VPS): `DOMAINNAME` (apex), `auth.DOMAINNAME`,
+    `traefik.DOMAINNAME`, `jellyfin.DOMAINNAME`, `pingvin.DOMAINNAME`,
+    `dispatcharr.DOMAINNAME`.
+    For media: `DOMAINNAME` (`media.domain.tld`) and `INTERNAL_DOMAINNAME`
+    (`media.internal.domain.tld`) must resolve to the external / internal tailnet addresses.
+-   The VPS needs no GPU: jellyfin runs there without hardware transcoding and reads its
+    library from `${APP_ROOT}/jellyfin/media`.
+
+### 1. Create the env files
+
+Each stack reads its own `.env` next to the compose file (git-ignored):
+
+```bash
+cd president && cp example.env .env
+cd ../media && cp example.env .env
+```
+
+#### president/.env
+
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `PUID` / `PGID` | yes | uid/gid every service runs as; owns `APP_ROOT` |
+| `TZ` | yes | e.g. `America/New_York` |
+| `DOMAINNAME` | yes | bare domain, no scheme or slashes |
+| `APP_ROOT` | yes | absolute path to the private app data on the VPS |
+| `CF_API_EMAIL` | yes | Cloudflare account email |
+| `CF_DNS_API_TOKEN` | yes | token described above |
+| `AUTHELIA_ADMIN_PASSWORD` | yes | authelia admin password in plain text, hashed at render time (step 3) |
+| `AUTHELIA_ADMIN_USER` / `AUTHELIA_ADMIN_EMAIL` | no | default `admin` / `admin@DOMAINNAME` |
+| `AUTHELIA_SESSION_SECRET` | yes | 32+ random bytes, hex |
+| `AUTHELIA_STORAGE_ENCRYPTION_KEY` | yes | 32+ random bytes, hex |
+| `CROWDSEC_BOUNCER_LAPI_KEY` | yes | bouncer key, see step 6 |
+| `PINGVIN_STORAGE_SIZE_MEGABITS` | only for `setup.sh` | see step 4 |
+| `UPTIME_KUMA_SLUG` | no | extra homepage widget |
+
+Generate the authelia secrets:
+
+```bash
+echo "AUTHELIA_SESSION_SECRET=$(openssl rand -hex 32)" >> .env
+echo "AUTHELIA_STORAGE_ENCRYPTION_KEY=$(openssl rand -hex 32)" >> .env
+echo "AUTHELIA_ADMIN_PASSWORD=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9')" >> .env
+```
+
+#### media/.env
+
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `PUID` / `PGID` | yes | uid/gid every service runs as |
+| `TZ` | yes | used by every container |
+| `DOMAINNAME` | yes | public name of the media stack |
+| `INTERNAL_DOMAINNAME` | yes | tailnet-only name for the internal routes |
+| `ROOT_DOMAINNAME` | yes | the president domain |
+| `APP_ROOT` | yes | absolute path to app data on the media host |
+| `DATA_MOUNT_DIR` | yes | where the media library lives |
+| `QBITTORRENT_INCOMPLETE_MOUNT` | yes | scratch space for incomplete torrents |
+| `TORRENT_PORT` | yes | port forwarded by gluetun for torrent traffic |
+| `TP_THEME` | yes | theme.park theme name for the *arrs |
+| `WIREGUARD_PROVIDER`, `WIREGUARD_PRIVATE_KEY`, `WIREGUARD_ADDRESSES`, `WIREGUARD_PRESHARED_KEY`, `WIREGUARD_SERVER_CITIES` | yes | gluetun VPN config |
+| `CF_API_EMAIL`, `CF_DNS_API_TOKEN` | yes | the media traefik also gets its cert via DNS-01 |
+| `ARIA2_RPC_SECRET` | yes | generate, see below |
+| `HEADSCALE_INTERNAL_AUTHKEY`, `HEADSCALE_EXTERNAL_AUTHKEY` | yes, see step 7 | pre-auth keys for the two tailscale ingress nodes |
+
+```bash
+echo "ARIA2_RPC_SECRET=$(openssl rand -base64 60 | tr -d '\n')" >> .env
+```
+
+`media/example.env` also carries optional `LOG_LEVEL`, `LOG_HTML` and `CAPTCHA_SOLVER`
+for flaresolverr.
+
+### 2. Create the data directories
+
+Docker will create missing bind-mount sources as root-owned directories, which then breaks
+the services that run as `PUID`. Create them up front.
+
+president:
+
+```bash
+cd president && . ./.env
+mkdir -p "$APP_ROOT"/{traefik/{data,logs,plugins},authelia/config,crowdsec/{config,data,logs},homepage/logs,jellyfin/{config,cache,media},dispatcharr/data,pingvin/{data,images,uploads/uploads},static/templates}
+chown -R "$PUID:$PGID" "$APP_ROOT"
+```
+
+media:
+
+```bash
+cd media && . ./.env
+mkdir -p "$APP_ROOT"/{aria/{data,session},cross-seed/{config,torrents},prowlarr/config,qbittorrent/config,radarr/{config,scripts},sonarr/{config,scripts},tailscale-internal/state,tailscale-external/state,traefik-tailscale/{data,logs},traefik-external/{data,logs}}
+mkdir -p "$DATA_MOUNT_DIR" "$QBITTORRENT_INCOMPLETE_MOUNT"
+chown -R "$PUID:$PGID" "$APP_ROOT" "$DATA_MOUNT_DIR" "$QBITTORRENT_INCOMPLETE_MOUNT"
+```
+
+Notes:
+
+-   `${APP_ROOT}/authelia/config` holds the rendered authelia config and your users database.
+    The sidecar writes into it, so it must stay writable by `PUID`.
+-   `${APP_ROOT}/crowdsec/{config,data,logs}` is populated by the crowdsec image on first start.
+    crowdsec runs as root (the image bootstraps its config with `rsync` from a root-owned
+    `/staging`), so those directories only need to be writable by root.
+-   `${APP_ROOT}/traefik/data` holds `acme.json`; traefik creates it with `0600` itself.
+-   `${APP_ROOT}/traefik/plugins` caches the crowdsec bouncer plugin.
+-   `${APP_ROOT}/dispatcharr/data` is everything dispatcharr owns — its postgres and redis
+    run inside the container, so nothing else on the host or network is needed.
+
+### 3. Configure Authelia
+
+Both files authelia needs are rendered by `president/authelia/container/init.sh`, which the
+`authelia-config` sidecar runs on every `docker compose up -d`:
+
+-   `configuration.yml`, from `president/authelia/config/configuration.template.yml`;
+-   `users_database.yml`, holding the `admin` user with `AUTHELIA_ADMIN_PASSWORD` from `.env`
+    hashed to argon2id at render time.
+
+That is the whole configuration step: set the password, no hash is ever committed.
+`AUTHELIA_ADMIN_USER` and `AUTHELIA_ADMIN_EMAIL` optionally override the account name and
+address (defaults `admin` and `admin@DOMAINNAME`).
+
+Both rendered files are overwritten on every run, so edit the templates in the repo, never the
+copies in `APP_ROOT`. To re-apply without touching anything else (after changing the password,
+for example):
+
+```bash
+docker compose run --rm authelia-config
+docker compose restart authelia
+```
+
+1.  Authelia only protects **two** routes — the homepage at `DOMAINNAME` and the traefik
+    dashboard at `traefik.DOMAINNAME`. `jellyfin.`, `pingvin.`, `static` (`.well-known`) and
+    the `auth.` portal itself are public; jellyfin and pingvin have to enforce their own auth.
+
+2.  The first login also enrols a TOTP device (the `totp` section is enabled), so have an
+    authenticator app ready.
+
+### 4. Pingvin storage image (optional)
+
+`president/setup.sh` preallocates `PINGVIN_STORAGE_SIZE_MEGABITS` MiB at
+`${APP_ROOT}/pingvin/uploads/pingvin.img` and runs `mkfs.ext4` on it:
+
+```bash
+cd president && ./setup.sh
+```
+
+The active compose file mounts `${APP_ROOT}/pingvin/uploads/uploads` as a plain directory.
+The image is only used if you uncomment the `volumes:` block at the bottom of
+`president/pingvin/compose.yaml` that mounts `pingvin.img`. Skipping `setup.sh` is fine if
+you keep the directory mount.
+
+### 5. Start the VPS stack
+
+`traefik` requires `CROWDSEC_BOUNCER_LAPI_KEY`, but that key can only be created after
+crowdsec has run once. On a fresh deploy, bootstrap in three moves:
+
+```bash
+cd president
+# 1. validate the config and start what crowdsec needs, with a throwaway key for traefik
+CROWDSEC_BOUNCER_LAPI_KEY=placeholder docker compose config -q   # fail fast on missing env
+CROWDSEC_BOUNCER_LAPI_KEY=placeholder docker compose up -d socket-proxy crowdsec
+
+# 2. register the bouncer (step 6) and write the real key into .env
+
+# 3. now everything else can come up, traefik and authelia included
+docker compose up -d
+docker compose ps
+```
+
+Order matters elsewhere in two places: `traefik` needs `socket-proxy` (compose enforces it),
+and `authelia` waits for the `authelia-config` renderer to exit successfully.
+
+The first visit to `https://dispatcharr.DOMAINNAME` creates the admin account. Dispatcharr
+only accepts that first-run POST from a private address by default; since traefik proxies
+from `10.120.0.0/24` that works out of the box. If it refuses, set
+`DISPATCHARR_SETUP_ALLOWED_IP` to your public IP for the initial setup and remove it after.
+
+### 6. Register the CrowdSec bouncer
+
+The traefik plugin is enabled and the bouncer middleware is applied to the `websecure`
+entrypoint, but it needs an API key before it can read decisions:
+
+```bash
+cd president
+docker compose exec crowdsec cscli bouncers add traefik-bouncer
+# copy the printed key into .env as CROWDSEC_BOUNCER_LAPI_KEY=...
+docker compose up -d            # picks up the key and starts traefik + the rest
+```
+
+Verification:
+
+```bash
+docker compose exec crowdsec cscli bouncers list     # traefik-bouncer should be listed
+docker compose exec crowdsec cscli metrics           # should show the traefik acquisition
+docker compose logs traefik | grep -i crowdsec       # plugin loading, no auth errors
+```
+
+Things to know:
+
+-   Traefik downloads `github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin` v1.8.2 from the
+    plugin catalogue on startup. The first start needs outbound internet; after that the
+    `/plugins-storage` volume keeps it cached. If the catalogue is unreachable, traefik will
+    not start.
+-   CrowdSec reads `${APP_ROOT}/traefik/logs/traefik-access.log` (mounted read-only as
+    `/var/log/traefik`), so keep traefik's access log enabled.
+-   Bans are applied on every route, including the public ones and the authelia portal, and
+    visitors get `president/traefik/ban.html`.
+
+### 7. Start the media stack
+
+**Read this first:** `media/traefik/compose.yaml` still starts both tailscale nodes with
+`--login-server https://headscale.${ROOT_DOMAINNAME}` and hello `HEADSCALE_INTERNAL_AUTHKEY` /
+`HEADSCALE_EXTERNAL_AUTHKEY`. The headscale service was removed from this repository, so the
+media ingress will not come up as-is. Pick one before starting:
+
+-   drop `--login-server ...` from both `TS_EXTRA_ARGS` lines to use Tailscale's control plane
+    (get the auth keys from the Tailscale admin console instead), or
+-   restore a control server and point the `--login-server` flag at it.
+
+Then:
+
+```bash
+cd media
+docker compose config -q
+docker compose up -d socket-proxy traefik-tailscale traefik-external
+docker compose up -d
+docker compose ps
+```
+
+The *arrs and qbittorrent only publish inside the tailnet: `sonarr.`, `radarr.`,
+`prowlarr.`, `qbit.` and `aria.INTERNAL_DOMAINNAME`, plus `romm-to-pingvin` — see the
+"Not deployed" section. Traefik here serves the external (`traefik-external`) and internal
+(`traefik-tailscale`) tailscale nodes, so nothing listens on the LAN directly.
+
+### 8. Post-deploy verification
+
+```bash
+curl -sI https://traefik.DOMAINNAME | head -1     # 302 to auth.DOMAINNAME
+curl -sI https://DOMAINNAME | head -1             # 302 to auth.DOMAINNAME
+curl -sI https://jellyfin.DOMAINNAME | head -1    # 200/302 straight from jellyfin
+curl -sI https://pingvin.DOMAINNAME | head -1     # 200 straight from pingvin
+curl -s  https://auth.DOMAINNAME/api/health       # {"status":"OK"}
+curl -sI https://dispatcharr.DOMAINNAME | head -1 # 200/302, straight from dispatcharr
+```
+
+If traefik answers `404` for a host, the router label is wrong. If it answers `502`, the
+service is not on the `traefik` network. If authelia answers `403`, the session cookie domain
+does not match `DOMAINNAME`.
+
+### The president stack stands alone
+
+Nothing in `president/` talks to the media host at runtime: no `depends_on` points at a
+remote service, traefik only reads the local docker socket proxy, and every bind mount lives
+under `APP_ROOT` on the VPS. Powering the media machine off costs you the *arrs, not the VPS
+— jellyfin, dispatcharr, pingvin, homepage, authelia and the dashboard keep serving.
+
+Two rules keep it that way when adding services:
+
+-   keep bind mounts on the VPS's own disk; never mount an NFS/SMB share from the media host
+    into a president container (`${APP_ROOT}/jellyfin/media` must stay local), because a dead
+    mount blocks container start;
+-   never add `depends_on` to a container on the other machine, and never route a public
+    hostname through the media stack's traefik — put the new container on the `traefik`
+    network here instead.
+
+### What is mounted and what is rendered
+
+| Config | How it gets in | To apply a change |
+| --- | --- | --- |
+| `president/homepage/config/` | mounted straight onto `/app/config` | `docker compose restart homepage` |
+| `president/authelia/config/configuration.template.yml` | rendered by `authelia-config` on every `up` | `docker compose run --rm authelia-config` |
+| `president/authelia/config/` (users database) | generated from `AUTHELIA_ADMIN_PASSWORD` by `authelia-config`, see step 3 | `docker compose run --rm authelia-config && docker compose restart authelia` |
+| `president/crowdsec/config/` | mounted as-is (acquis + whitelist) | `docker compose restart crowdsec` |
+| `${APP_ROOT}/dispatcharr/data` | plain bind mount at `/data` | `docker compose restart dispatcharr` |
+| `president/static/web/` | rendered into `${APP_ROOT}/static/templates` by `president/static/container/init.sh` | `docker compose restart static` |
+
+## Not deployed
+
+The files are kept in the repo but are **not** included by either `compose.yaml`:
+
+-   `president/exit-node/` — was only a headscale exit node
+    (`TAILSCALE_EXIT_NODE_PREAUTH_KEY`).
+-   `media/frpc/` — its `frps` server was removed from `president/` (`FRP_OIDC_ISSUER`,
+    `FRP_OIDC_AUDIENCE`, `FRP_OIDC_CLIENT_SECRET`, `FRP_OIDC_TOKEN_ENDPOINT`).
+-   `media/upload/` — only knows how to talk to `romm`, which was removed
+    (`PINGVIN_UPLOAD_ROMM_USERNAME`, `PINGVIN_UPLOAD_ROMM_PASSWORD`,
+    `PINGVIN_UPLOAD_PINGVIN_USERNAME`, `PINGVIN_UPLOAD_PINGVIN_PASSWORD`).
+
+Two more pieces are commented out inside deployed files and are therefore unused too: the
+`autobrr` block in `media/downloader/qbit/compose.yaml` (`${APP_ROOT}/autobrr/config`,
+`DOCKERLOGGING_MAXFILE`, `DOCKERLOGGING_MAXSIZE`) and the `game-unpackerr` block in
+`media/downloader/aria/compose.yaml` (`${APP_ROOT}/unpackerr/logs`). Create their
+directories and set their variables only if you re-enable them.
+
+To bring a parked service back, uncomment its `include:` line in the relevant `compose.yaml`
+(and restore the service it depends on first).

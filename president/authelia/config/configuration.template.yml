@@ -1,0 +1,72 @@
+---
+###############################################################
+# Authelia (replaces authentik)
+#
+# rendered by container/init.sh into ${APP_ROOT}/authelia/config/configuration.yml,
+# secrets come from the environment passed by the compose file.
+#
+# No OIDC provider is configured: every app keeps its own login, authelia is
+# used for forward-auth on the homepage and the traefik dashboard only.
+#
+# https://www.authelia.com/configuration/prologue/introduction/
+###############################################################
+theme: 'dark'
+
+server:
+    address: 'tcp://0.0.0.0:9091'
+    endpoints:
+        authz:
+            forward-auth:
+                implementation: 'ForwardAuth'
+
+log:
+    level: 'info'
+
+totp:
+    issuer: '${DOMAINNAME}'
+
+authentication_backend:
+    # no SMTP notifier in this setup, so password reset is off
+    password_reset:
+        disable: true
+
+    file:
+        path: '/config/users_database.yml'
+        password:
+            algorithm: 'argon2'
+            argon2:
+                variant: 'argon2id'
+                iterations: 3
+                memory: 65536
+                parallelism: 4
+                key_length: 32
+                salt_length: 16
+
+access_control:
+    # only routers carrying middlewares-authelia@file are affected,
+    # everything else stays public
+    default_policy: 'one_factor'
+    rules:
+        - domain: 'auth.${DOMAINNAME}'
+          policy: 'bypass'
+
+session:
+    secret: '${SESSION_SECRET}'
+    cookies:
+        - domain: '${DOMAINNAME}'
+          authelia_url: 'https://auth.${DOMAINNAME}'
+          default_redirection_url: 'https://${DOMAINNAME}'
+
+regulation:
+    max_retries: 3
+    find_time: '2m'
+    ban_time: '5m'
+
+storage:
+    encryption_key: '${STORAGE_ENCRYPTION_KEY}'
+    local:
+        path: '/config/db.sqlite3'
+
+notifier:
+    filesystem:
+        filename: '/config/notifications.txt'

@@ -14,6 +14,9 @@ services:
         ports:
             - 80:80
             - 443:443
+        labels:
+            # the dashboard is publicly routed but only reachable after authelia login
+            traefik.http.routers.traefik-rtr.middlewares: middlewares-authelia@file
         volumes:
             - "${APP_ROOT}/traefik/logs:/logs"
             - "${APP_ROOT}/traefik/data:/data" # acme.json defined in traefik.yaml
@@ -22,13 +25,16 @@ services:
         environment:
             ROOT_DOMAINNAME: ${DOMAINNAME:?needs domain name}
 
-            # TRAEFIK_EXPERIMENTAL_PLUGINS_BOUNCER_MODULENAME: github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin
-            # TRAEFIK_EXPERIMENTAL_PLUGINS_BOUNCER_VERSION: v1.3.5
+            # crowdsec bouncer, downloaded from the plugin catalogue on startup
+            TRAEFIK_EXPERIMENTAL_PLUGINS_BOUNCER_MODULENAME: github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin
+            TRAEFIK_EXPERIMENTAL_PLUGINS_BOUNCER_VERSION: v1.8.2
 
-            # CROWDSEC_API_KEY: ${CROWDSEC_BOUNCER_LAPI_KEY}
+            # create it once with: docker compose exec crowdsec cscli bouncers add traefik-bouncer
+            CROWDSEC_API_KEY: ${CROWDSEC_BOUNCER_LAPI_KEY:?needs a crowdsec bouncer key}
 
-            # TRAEFIK_ENTRYPOINTS_WEBSECURE_HTTP_MIDDLEWARES: >-
-            #     middlewares-rate-limit@file,
-            #     middlewares-compress@file,
-            #     middlewares-secure-headers@file,
-            #     middlewares-crowdsec@file
+            # bans are applied on every route, including the ones without authelia
+            TRAEFIK_ENTRYPOINTS_WEBSECURE_HTTP_MIDDLEWARES: >-
+                middlewares-rate-limit@file,
+                middlewares-compress@file,
+                middlewares-secure-headers@file,
+                middlewares-crowdsec@file

@@ -75,7 +75,7 @@ services:
 #     labels:
 #         traefik.enable: true
 #         traefik.http.routers.autobrr-rtr.rule: Host(`autobrr.${DOMAINNAME}`)
-#         traefik.http.routers.autobrr-rtr.middlewares: middlewares-authentik@file
+#         traefik.http.routers.autobrr-rtr.middlewares: middlewares-authelia@file
 
 #         homepage.group: internal
 #         homepage.name: AutoBRR

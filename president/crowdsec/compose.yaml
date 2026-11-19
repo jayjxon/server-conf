@@ -2,7 +2,11 @@ services:
     crowdsec:
         image: crowdsecurity/crowdsec:latest
         container_name: crowdsec
-        user: ${PUID}:${PGID}
+        # the image bootstraps /etc/crowdsec with rsync from a root-owned /staging,
+        # so it has to run as root; the config dir must be writable by it
+        security_opt:
+            - no-new-privileges:true
+        pids_limit: 200
         environment:
             TZ: ${TZ}
             PUID: ${PUID}
@@ -13,7 +17,8 @@ services:
         volumes:
             - ${APP_ROOT}/crowdsec/logs:/var/log/crowdsec:ro
             - ${APP_ROOT}/crowdsec/data:/var/lib/crowdsec/data
-            - ${APP_ROOT}/crowdsec/logs/auth_log.log:/var/log/auth.log:ro
+            # first start populates this from the image defaults, then it keeps
+            # the hub/scenario updates; must be writable by PUID:PGID
             - ${APP_ROOT}/crowdsec/config:/etc/crowdsec
 
             - ${APP_ROOT}/traefik/logs:/var/log/traefik:ro

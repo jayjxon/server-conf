@@ -2,6 +2,7 @@ services:
     homepage:
         image: gethomepage/homepage:latest
         container_name: homepage
+        restart: unless-stopped
         networks:
             - traefik
             - socket_proxy
@@ -13,18 +14,15 @@ services:
             PUID: ${PUID}
             PGID: ${PGID}
 
-            PROXY_SUBDOMAINS: ${PROXY_SUBDOMAINS:?}
             HOMEPAGE_ALLOWED_HOSTS: ${DOMAINNAME}
         volumes:
-            # NOTE: this is copied to /app/config by init.sh
-            - ./config:/config # Make sure your local config directory exists
-            - ./container/init.sh:/usr/local/bin/init.sh
+            # mounted straight onto the path the image reads, no init step involved
+            - ./config:/app/config
             - ${APP_ROOT}/homepage/logs:/app/config/logs
         expose:
             - 3000
-        entrypoint: ["/bin/sh", "/usr/local/bin/init.sh"]
         labels:
             traefik.enable: true
             traefik.http.routers.homepage-rtr.rule: Host(`${DOMAINNAME}`)
-            traefik.http.routers.homepage-rtr.middlewares: middlewares-authentik@file,middlewares-error-pages@file
+            traefik.http.routers.homepage-rtr.middlewares: middlewares-authelia@file,middlewares-error-pages@file
             traefik.http.routers.homepage-rtr.priority: 25

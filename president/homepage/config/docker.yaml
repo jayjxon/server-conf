@@ -1,5 +1,4 @@
 my-docker:
     host: socket-proxy
     port: 2375
-# modified by init.sh
-# you have to restart the container to apply the changes
+# mounted straight from the repo, restart the container to apply changes

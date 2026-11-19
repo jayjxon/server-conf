@@ -5,15 +5,8 @@ networks:
             config:
                 - subnet: 10.125.0.0/24
 
-    jellyfin:
-        driver: bridge
-
     socket_proxy:
         name: socket_proxy
-        driver: bridge
-
-    socket_proxy_writable:
-        name: socket_proxy_writable
         driver: bridge
 
     traefik-tailscale:
@@ -30,13 +23,10 @@ include:
     # common
     - ../common/socket-proxy/compose.yaml
 
-    # maybe not so common after all
-    - ./watchtower/compose.yaml
     - ./traefik/compose.yaml
-
     - ./arrs/compose.yaml
     - ./downloader/compose.yaml
-    - ./view/compose.yaml
-    - ./frpc/compose.yaml
-    - ./upload/compose.yaml
-    - ./romm/compose.yaml
+
+    # not deployed anymore, kept for reference
+    # - ./frpc/compose.yaml # needs the frps server
+    # - ./upload/compose.yaml # only knows how to talk to romm
