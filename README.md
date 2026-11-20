@@ -380,6 +380,11 @@ Two limits, before expecting a library:
 Only text tracks can be recovered: `subrip`, `ass`, `webvtt` and `mov_text`. PGS and VobSub are
 bitmaps and stay unreadable without OCR.
 
+For the items with no embedded track, `president/jellyfin/subs/` holds a one-off backfill that
+drives **Subf2m** (free, no account, no quota) through jellyfin's own subtitle downloader, and
+resolves the IMDb ids it requires first — see the README in that folder for the run order, the
+measured rates and the known gaps.
+
 ### 6. Register the CrowdSec bouncer
 
 **CrowdSec is currently disabled.** Its `include:` in `president/compose.yaml` is commented out

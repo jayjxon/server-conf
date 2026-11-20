@@ -140,6 +140,37 @@ Two things that follow from this:
     access-control rule for `dispatcharr.DOMAINNAME` carries `subject: group:admins`. A user
     outside the group gets a 403 from the portal and never reaches the app.
 
+## Subtitles for the VOD library
+
+Bazarr cannot fill this catalogue: it recovers embedded tracks only and manages what
+Sonarr/Radarr index, and every free web provider except Subf2m wants an account or answers
+403/404. `president/jellyfin/subs/` therefore holds a one-off backfill that drives Subf2m
+through jellyfin's own downloader. Nothing there is wired into compose — it is three scripts
+plus a README with the run order, the API-key setup, the stop/resume commands and the measured
+rates. Read that README before re-running anything.
+
+-   Subf2m (and every subbuzz provider) searches by **IMDb id**, and the library is TMDB-only,
+    so `resolve_imdb.py` has to run first. It fills `BaseItemProviders(ProviderId='Imdb')`,
+    which is where jellyfin keeps provider ids and where an item refresh will not wipe them;
+    episodes inherit the series' id. The ids come from IMDb's keyless suggestion endpoint, not
+    Wikidata — Wikidata maps titles to the wrong film.
+-   `fetch_subs.py` needs a key in the `ApiKeys` table **plus `docker restart jellyfin`**, the
+    table is read at startup. Admin endpoints (`/Plugins`, `/ScheduledTasks`) stay 401 even
+    with a good key, so it only uses `Items/{id}` and `Items/{id}/RemoteSearch/Subtitles`.
+-   Judge progress by files or by the media-source list, never by the DB: `MediaStreamInfos`
+    rows for external subtitles are transient. A `204` from the download means the file was
+    written, not that the client will offer it — that is `GET /Users/{uid}/Items/{id}`
+    reporting `English - SUBRIP - External`.
+-   Host state it depends on: subbuzz's `EnableSubf2m` and `MinScore=20` (Subf2m scores low),
+    one `RequirePerfectSubtitleMatch=false` in `root/default/Shows/options.xml` (a duplicated
+    element silently drops settings), and `SaveSubtitlesWithMedia=false` because the VOD tree
+    is read-only.
+-   Limits worth knowing before promising coverage: Subf2m has no per-season page for every
+    show — Attack on Titan S1 gets zero candidates while S02/S03 work — about a fifth of titles
+    never resolve an IMDb id, and addic7ed crashes subbuzz 1.5.1 internally. Throughput is
+    ~17 items/min at 3 workers, i.e. ~9 days for all 222k items; more workers makes Subf2m
+    return nothing for concurrent searches of one series.
+
 ## Exit node
 
 The exit node runs with `network_mode: host` and `TS_USERSPACE=false`: userspace networking
