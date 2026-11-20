@@ -6,6 +6,13 @@ services:
             - no-new-privileges:true
         pids_limit: 200
         user: ${PUID}:${PGID}
+        # this host has no IPv6 route, but the metadata/image hosts publish AAAA records,
+        # so .NET picks an unreachable IPv6 address and every fetch burns the full 100s
+        # HttpClient timeout. disabling IPv6 inside the container makes the lookup fail
+        # over to IPv4 immediately, which is the difference between ~7 and ~25 items/min
+        sysctls:
+            - net.ipv6.conf.all.disable_ipv6=1
+            - net.ipv6.conf.default.disable_ipv6=1
         environment:
             - TZ=${TZ:-Etc/UTC}
             - JELLYFIN_PublishedServerUrl=https://jellyfin.${DOMAINNAME}
