@@ -54,9 +54,25 @@ access_control:
         - domain: 'auth.${DOMAINNAME}'
           policy: 'bypass'
 
+        # the VOD proxy is fetched by media players themselves: every .strm in jellyfin's
+        # library points at https://dispatcharr.${DOMAINNAME}/proxy/vod/..., and a player
+        # cannot complete an authelia redirect. this one path is therefore exempt, and it
+        # has to stay before the rule below or that rule would match it first
+        - domain: 'dispatcharr.${DOMAINNAME}'
+          resources:
+              - '^/proxy/vod/.*'
+          policy: 'bypass'
+
         # dispatcharr is for the admin account only. anyone else who passes the first
         # factor is refused with 403 here, before the request reaches the app
         - domain: 'dispatcharr.${DOMAINNAME}'
+          policy: 'one_factor'
+          subject:
+              - 'group:admins'
+
+        # bazarr runs no login of its own (its native oidc needs a release newer than the
+        # stable image), so this rule is the only gate, and it is admins only as well
+        - domain: 'bazarr.${DOMAINNAME}'
           policy: 'one_factor'
           subject:
               - 'group:admins'

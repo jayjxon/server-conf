@@ -1,0 +1,45 @@
+services:
+    # subtitle manager for the VOD library. jellyfin's own subtitle support is the
+    # opensubtitles plugin, which needs an account and can only fetch what a provider
+    # already has; bazarr's embedded subtitles provider instead pulls the text tracks
+    # that are already inside each title and writes them out as a sidecar, which costs
+    # no download and is always in sync with the release
+    bazarr:
+        image: lscr.io/linuxserver/bazarr:latest
+        container_name: bazarr
+        restart: unless-stopped
+        security_opt:
+            - no-new-privileges:true
+        # probing and extracting runs ffprobe/ffmpeg against the .strm urls, and several
+        # searches can be in flight at once
+        pids_limit: 300
+        environment:
+            PUID: ${PUID}
+            PGID: ${PGID}
+            TZ: ${TZ:-Etc/UTC}
+        volumes:
+            - ${APP_ROOT}/bazarr/config:/config
+            # the same tree jellyfin mounts read-only at /data/vods, and deliberately the
+            # same path here. it has to be writable on this side: the extracted subtitle
+            # lands as a sidecar .srt next to the .strm, which is the only place jellyfin
+            # looks for an external subtitle on a .strm item
+            - ${APP_ROOT}/dispatcharr/vods:/data/vods
+        expose:
+            - 6767
+        networks:
+            - traefik
+        labels:
+            traefik.enable: true
+
+            # no login of its own, exactly like dispatcharr: authelia is the gate. bazarr's
+            # native oidc login only exists in releases newer than the stable image, so
+            # forward auth is what protects it, and the authelia rule for this host limits
+            # it to the admins group
+            traefik.http.routers.bazarr-rtr.rule: Host(`bazarr.${DOMAINNAME}`)
+            traefik.http.routers.bazarr-rtr.middlewares: middlewares-authelia@file
+            traefik.http.services.bazarr-svc.loadbalancer.server.port: 6767
+
+            homepage.group: media
+            homepage.name: Bazarr
+            homepage.icon: sh-bazarr.svg
+            homepage.href: https://bazarr.${DOMAINNAME}

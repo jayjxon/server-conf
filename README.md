@@ -14,6 +14,7 @@ On the VPS, I have the following services running:
 -   [x] Homepage
 -   [x] Jellyfin
 -   [x] Dispatcharr
+-   [x] Bazarr
 -   [x] Pingvin Share
 -   [x] Static site
 -   [x] CrowdSec
@@ -31,7 +32,7 @@ On the local machine, I have the following services running:
 
 ## Repository layout
 
--   `president/` — the public VPS stack (traefik, authelia, homepage, jellyfin, pingvin, static, crowdsec)
+-   `president/` — the public VPS stack (traefik, authelia, homepage, jellyfin, dispatcharr, bazarr, pingvin, static, crowdsec)
 -   `media/` — the home server stack (traefik + tailscale nodes, *arrs, qbittorrent/gluetun, aria2, cross-seed)
 -   `common/` — socket proxy and traefik definitions shared by both stacks
 -   everything outside `president/` and `media/` at the top level is docs or devenv plumbing
@@ -55,7 +56,7 @@ Everything in this section has to be done once, in order, before the first
     `NET_ADMIN` as well.
 -   A Cloudflare API token with `Zone -> DNS -> Edit` and `Zone -> Zone -> Read` on the zone.
 -   DNS records (A/AAAA to the VPS): `DOMAINNAME` (apex), `auth.DOMAINNAME`,
-    `traefik.DOMAINNAME`, `jellyfin.DOMAINNAME`, `pingvin.DOMAINNAME`,
+    `traefik.DOMAINNAME`, `jellyfin.DOMAINNAME`, `bazarr.DOMAINNAME`, `pingvin.DOMAINNAME`,
     `dispatcharr.DOMAINNAME`.
     For media: `DOMAINNAME` (`media.domain.tld`) and `INTERNAL_DOMAINNAME`
     (`media.internal.domain.tld`) must resolve to the external / internal tailnet addresses.
@@ -138,7 +139,7 @@ president:
 
 ```bash
 cd president && . ./.env
-mkdir -p "$APP_ROOT"/{traefik/{data,logs,plugins},authelia/config,crowdsec/{config,data,logs},homepage/logs,jellyfin/{config,cache,media},dispatcharr/{data,vods},pingvin/{data,images,uploads/uploads},tailscale/{data,cache}}
+mkdir -p "$APP_ROOT"/{traefik/{data,logs,plugins},authelia/config,crowdsec/{config,data,logs},homepage/logs,jellyfin/{config,cache,media},dispatcharr/{data,vods},bazarr/config,pingvin/{data,images,uploads/uploads},tailscale/{data,cache}}
 chown -R "$PUID:$PGID" "$APP_ROOT"
 ```
 
@@ -227,14 +228,18 @@ URL, cookie and registration flags that were set in its UI, plus the OIDC client
 file exists, pingvin's admin UI is read-only for those keys — change the values in
 `president/pingvin/compose.yaml` and recreate the container instead.
 
-1.  Authelia protects **three** routes — the homepage at `DOMAINNAME`, the traefik dashboard at
-    `traefik.DOMAINNAME` and dispatcharr at `dispatcharr.DOMAINNAME`. Dispatcharr is narrower
-    than the other two: its access-control rule requires the `admins` group, so any other
-    authelia user is refused with 403. That group is the `groups:` list on the user in
-    `president/authelia/compose.yaml`.
+1.  Authelia protects **four** routes — the homepage at `DOMAINNAME`, the traefik dashboard at
+    `traefik.DOMAINNAME`, dispatcharr at `dispatcharr.DOMAINNAME` and bazarr at
+    `bazarr.DOMAINNAME`. The last two are narrower than the other two: their access-control
+    rules require the `admins` group, so any other authelia user is refused with 403. That
+    group is the `groups:` list on the user in `president/authelia/compose.yaml`.
 
     `jellyfin.`, `pingvin.`, `static` (`.well-known`) and the `auth.` portal itself are public;
     jellyfin enforces its own auth and pingvin signs in through authelia's OIDC provider.
+
+    The one exception inside dispatcharr is `/proxy/vod/`, which is `bypass`: media players
+    fetch those URLs themselves and cannot complete a login redirect. Everything else on that
+    host still needs `admins`.
 
 2.  The first login also enrols a TOTP device (the `totp` section is enabled), so have an
     authenticator app ready.
@@ -314,9 +319,11 @@ Then:
 
 1.  Dispatcharr → Plugins → Find Plugins → **VOD to Media Library** → Install → Enable.
 2.  Settings: Movies root `/VODS/Movies`, Series root `/VODS/Series`, and **Dispatcharr URL
-    `http://dispatcharr:9191`**. Jellyfin loads the same docker network, while the public
-    `https://dispatcharr.DOMAINNAME` is answered with authelia's 302 and plays nothing. The
-    plugin refuses `localhost` for the same reason.
+    `https://dispatcharr.DOMAINNAME`**. That URL is baked into every `.strm` and the player
+    fetches it itself — direct play is a redirect to it, so it has to resolve for the client,
+    not just for jellyfin. `http://dispatcharr:9191` only resolves inside the docker network,
+    which is why players outside it (the Roku app, a phone) played nothing while the server
+    could probe the same file fine. The plugin refuses `localhost` for the same reason.
 3.  `[LIBRARY] Catalogue snapshot`, then `[GENERATE] Movies` with the batch size at 10 for a
     first look. Files already generated are skipped on later runs.
 4.  Jellyfin → Dashboard → Libraries → add **Movies** at `/data/vods/Movies` and **Shows** at
@@ -333,6 +340,44 @@ Two limits worth knowing before turning it loose on the whole catalogue:
     already-generated `.strm` files. Keep the plugin's `?stream_id=` pinning on, run
     `[GENERATE] Full rescan` after a provider refresh, and give the auto-rescan cron a nightly
     slot.
+
+#### Subtitles for the VOD library (bazarr)
+
+`bazarr` mounts the same VOD tree as jellyfin — read-write, and at the same `/data/vods` path —
+because the subtitle it extracts has to land as a sidecar `.srt` beside the `.strm`, which is the
+only place jellyfin looks for an external subtitle on a `.strm` item.
+
+The plugin creates that tree as root, and `chmod -R a+r` above only makes it readable. Hand it to
+`PUID` once so bazarr can write into it (dispatcharr runs as root, so it keeps writing there):
+
+```bash
+cd president && . ./.env
+chown -R "$PUID:$PGID" "$APP_ROOT/dispatcharr/vods"
+```
+
+Then, in bazarr (`https://bazarr.DOMAINNAME`, behind authelia, admins only):
+
+1.  Settings → General → Security: leave the authentication type on **No Authentication**. The
+    router is the gate, the same arrangement dispatcharr uses.
+2.  Settings → Subtitles: enable **Enable .strm Support** and disable **Treat Embedded
+    Subtitles as Downloaded**. With that one on, bazarr counts the tracks inside the file as
+    already downloaded and never extracts them. Leave the parser on `FFprobe`.
+3.  Settings → Providers: add **Embedded Subtitles**. It is a local extractor, not a web
+    source, so it needs no account — it reads the container with `ffprobe` and writes the chosen
+    track with `ffmpeg`.
+4.  Settings → Languages: enable `English` and put it in the default profile.
+
+Two limits, before expecting a library:
+
+-   bazarr does not scan for media. It manages what Sonarr and Radarr index, so it opens empty:
+    the VOD tree has to be in one of them (a Radarr root folder on `/data/vods/Movies`) before
+    the embedded provider has anything to extract.
+-   probing a `.strm` fetches through `https://dispatcharr.DOMAINNAME/proxy/vod/...`, so every
+    search goes back out to the provider. Point it at a subset rather than the whole catalogue
+    at once, and keep the auto-search interval generous.
+
+Only text tracks can be recovered: `subrip`, `ass`, `webvtt` and `mov_text`. PGS and VobSub are
+bitmaps and stay unreadable without OCR.
 
 ### 6. Register the CrowdSec bouncer
 
@@ -407,6 +452,7 @@ curl -sI https://jellyfin.DOMAINNAME | head -1    # 200/302 straight from jellyf
 curl -sI https://pingvin.DOMAINNAME | head -1     # 200 straight from pingvin
 curl -s  https://auth.DOMAINNAME/api/health       # {"status":"OK"}
 curl -sI https://dispatcharr.DOMAINNAME | head -1 # 302 to auth.DOMAINNAME
+curl -sI https://bazarr.DOMAINNAME | head -1     # 302 to auth.DOMAINNAME
 ```
 
 If traefik answers `404` for a host, the router label is wrong. If it answers `502`, the
@@ -438,7 +484,8 @@ Two rules keep it that way when adding services:
 | `AUTHELIA_ADMIN_PASSWORD_HASH` in `.env` | becomes `/config/users_database.yml` through a compose config, see step 3 | `docker compose up -d --force-recreate authelia` |
 | `president/crowdsec/config/` | mounted as-is (acquis + whitelist) | `docker compose restart crowdsec` |
 | `${APP_ROOT}/dispatcharr/data` | plain bind mount at `/data` | `docker compose restart dispatcharr` |
-| `${APP_ROOT}/dispatcharr/vods` | VOD `.strm` tree, `/VODS` in dispatcharr and `/data/vods:ro` in jellyfin | `docker compose up -d dispatcharr jellyfin` |
+| `${APP_ROOT}/dispatcharr/vods` | VOD `.strm` tree, `/VODS` in dispatcharr, `/data/vods:ro` in jellyfin, `/data/vods` (writable) in bazarr | `docker compose up -d dispatcharr jellyfin bazarr` |
+| `${APP_ROOT}/bazarr/config` | plain bind mount at `/config`, holds `config.yaml` and bazarr's database | `docker compose restart bazarr` |
 | `president/static/web/` | bind-mounted read-only, `{{env "DOMAINNAME"}}` expanded by caddy's `templates` directive | `docker compose restart static` |
 | `president/pingvin/compose.yaml` (configs) | rendered to `/opt/app/config.yaml`, oidc included | `docker compose up -d --force-recreate pingvin-share` |
 

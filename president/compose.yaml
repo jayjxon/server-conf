@@ -12,6 +12,7 @@ include:
     # services
     - ./jellyfin/compose.yaml
     - ./dispatcharr/compose.yaml
+    - ./bazarr/compose.yaml
     - ./pingvin/compose.yaml
     - ./static/compose.yaml
 
