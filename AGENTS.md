@@ -172,7 +172,29 @@ Known gaps, currently deliberate rather than fixed:
 -   Images carry `latest`/`stable` tags (`jellyfin`, `caddy`, `dispatcharr`, `bazarr`,
     `error-pages`, `pingvin`, `gluetun`, `tailscale`), so any `pull` is an unreviewed upgrade.
 
-## Subtitles for the VOD library
+## Host firewall
+
+There is no `ufw`. Do not add one: `ufw enable` flushes the tables, taking docker's
+`DOCKER-*` chains, tailscale's `ts-input`/`ts-forward` and the Oracle image's
+`InstanceServices` metadata rules with it. The firewall is the file-based iptables ruleset the
+Oracle image ships, loaded by `netfilter-persistent` (`/etc/iptables/rules.v4`,
+`rules.v6`), and that file is the source of truth.
+
+-   `rules.v4`: `INPUT` allows loopback, established traffic, icmp, `22/tcp` and jumps
+    `ts-input` for tailscale; the last rule rejects everything else. There is deliberately no
+    `80`/`443` rule — docker's DNAT sends published ports through `FORWARD`/`DOCKER`, never
+    through `INPUT`, so adding them only widens what a host process could bind.
+-   `rules.v6`: originally `-P INPUT ACCEPT` with no rules (the cloud image ships an empty
+    file), i.e. wide open if the instance ever got a global IPv6 address. It now mirrors v4:
+    loopback, established, icmpv6, `tailscale0`, `22/tcp`, reject the rest. Applied
+    append-only in the live table so docker and tailscale chains are untouched.
+-   `rpcbind` is masked. Nothing here mounts nfs/cifs, and port `111` was the only listener
+    that nothing needed.
+-   Changing these files does not change the live rules: `iptables-restore < file` (or
+    `systemctl restart netfilter-persistent`) applies them. Test with `--test` first; a restore
+    flushes the table, which is why the live edits were appended instead.
+
+
 
 Bazarr cannot fill this catalogue: it recovers embedded tracks only and manages what
 Sonarr/Radarr index, and every free web provider except Subf2m wants an account or answers

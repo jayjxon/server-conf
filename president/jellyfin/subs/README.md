@@ -56,7 +56,7 @@ docker restart jellyfin            # keys are read at startup
 sudo -i python3 -c "
 import sqlite3;c=sqlite3.connect('/srv/apps/jellyfin/config/data/jellyfin.db')
 print(c.execute(\"select AccessToken from ApiKeys where Name='buffy-temp'\").fetchone()[0])" > /tmp/buffy.key
-sudo chmod 644 /tmp/buffy.key
+sudo chmod 600 /tmp/buffy.key      # root-only; every script below runs under sudo
 
 # step 1 (hours), step 2+3 (days) — setsid so they survive the ssh session
 sudo setsid nohup python3 /srv/apps/jellyfin/subs/resolve_imdb.py >> /srv/apps/jellyfin/subs/resolve.out 2>&1 &
