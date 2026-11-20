@@ -348,11 +348,12 @@ because the subtitle it extracts has to land as a sidecar `.srt` beside the `.st
 only place jellyfin looks for an external subtitle on a `.strm` item.
 
 The plugin creates that tree as root, and `chmod -R a+r` above only makes it readable. Hand it to
-`PUID` once so bazarr can write into it (dispatcharr runs as root, so it keeps writing there):
+`PUID` once so bazarr can write into it (dispatcharr runs as root, so it keeps writing there).
+That needs `sudo` — the files belong to root, not to the account running compose:
 
 ```bash
 cd president && . ./.env
-chown -R "$PUID:$PGID" "$APP_ROOT/dispatcharr/vods"
+sudo chown -R "$PUID:$PGID" "$APP_ROOT/dispatcharr/vods"
 ```
 
 Then, in bazarr (`https://bazarr.DOMAINNAME`, behind authelia, admins only):
