@@ -100,7 +100,10 @@ configs:
                 fieldNameMemberOf: 'memberOf'
                 fieldNameEmail: 'userPrincipalName'
             oauth:
-                allowRegistration: 'true'
+                # pingvin is reachable without authelia in front of it, so auto-provisioning
+                # would hand any identity authelia ever authenticates an account with upload
+                # rights. the admin account is the only one that should exist
+                allowRegistration: 'false'
                 ignoreTotp: 'true'
                 disablePassword: 'false'
                 github-enabled: 'false'

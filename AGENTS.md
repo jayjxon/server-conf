@@ -140,6 +140,38 @@ Two things that follow from this:
     access-control rule for `dispatcharr.DOMAINNAME` carries `subject: group:admins`. A user
     outside the group gets a 403 from the portal and never reaches the app.
 
+## What is public
+
+Only `traefik` publishes ports (80/443); every other container uses `expose`, so nothing is
+reachable except through a router. Everything the internet can reach without a session:
+
+-   `auth.DOMAINNAME` — the portal itself, `bypass` by necessity, throttled by authelia's
+    regulation (3 tries / 2 min, 5 min ban);
+-   `jellyfin.DOMAINNAME` — **no** authelia middleware at all: jellyfin's own login is the gate,
+    and `/Users/Public` lists the accounts to anyone;
+-   `pingvin.DOMAINNAME` — OIDC through authelia, deliberately, plus its public share links
+    (share registration and unauthenticated shares are both off in its config);
+-   `dispatcharr.DOMAINNAME/proxy/vod/**` — `bypass`, because every `.strm` points a player at
+    it and a player cannot complete a redirect. Traversal does not widen it: traefik
+    normalises the path before authelia matches, so `/proxy/vod/../api/…` still redirects to
+    the portal (verified 2026-11-20), and everything else on that host is `group:admins`;
+-   `/.well-known/*` on the apex (matrix + OpenID discovery, for federation that does not
+    exist yet) and the error-page catch-all, which answers any unknown Host.
+
+Known gaps, currently deliberate rather than fixed:
+
+-   `access_control.default_policy` is `one_factor`, so TOTP is enrolled but never *demanded*:
+    a password alone opens the homepage, the dashboard, dispatcharr and bazarr. `two_factor` is
+    the one-line change if that is not wanted.
+-   CrowdSec is disabled (above), so nothing bans abusive IPs at the edge; jellyfin and the
+    portal face brute force with authelia's regulation only. Re-enabling needs a whitelist for
+    your own address and an exclusion for dispatcharr's artwork 404s.
+-   Every container on the `traefik` network can reach `dispatcharr:9191`, and
+    `DISPATCHARR_TRUSTED_PROXIES` is that whole subnet — so homepage or pingvin, if compromised,
+    can assert `Remote-User: admin`. Segmentation (a dispatcharr-only network) is the fix.
+-   Images carry `latest`/`stable` tags (`jellyfin`, `caddy`, `dispatcharr`, `bazarr`,
+    `error-pages`, `pingvin`, `gluetun`, `tailscale`), so any `pull` is an unreviewed upgrade.
+
 ## Subtitles for the VOD library
 
 Bazarr cannot fill this catalogue: it recovers embedded tracks only and manages what
