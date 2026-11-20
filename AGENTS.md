@@ -172,6 +172,16 @@ Known gaps, currently deliberate rather than fixed:
 -   Images carry `latest`/`stable` tags (`jellyfin`, `caddy`, `dispatcharr`, `bazarr`,
     `error-pages`, `pingvin`, `gluetun`, `tailscale`), so any `pull` is an unreviewed upgrade.
 
+## Posters for the VOD library
+
+`president/jellyfin/images/fetch_posters.py` queues a poster refresh for the 3,039 movies and
+24 series that have none (most already carry a TMDB id). It currently achieves nothing for a
+configuration reason, not a script one: both libraries have `EnableInternetProviders` `false`
+with empty `ImageFetchers`, and the TMDB plugin holds an empty `<TmdbApiKey />`. Those live in
+`${APP_ROOT}/jellyfin/config`, i.e. host state. Read
+`president/jellyfin/images/README.md` before enabling them — the same switch also refetches
+metadata, which would overwrite the titles dispatcharr imported for every `.strm` item.
+
 ## Host firewall
 
 There is no `ufw`. Do not add one: `ufw enable` flushes the tables, taking docker's
