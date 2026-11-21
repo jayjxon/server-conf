@@ -33,7 +33,8 @@ Run in this order. Each step is resumable: nothing is redone.
     using IMDb's keyless suggestion endpoint (no key, no login). Episodes need no id of their
     own: subbuzz inherits the series' id.
 2.  `fetch_subs.py` — asks jellyfin's own subtitle downloader for candidates, keeps the
-    Subf2m ones, downloads the first, then refreshes the item so the new file is registered.
+    Subf2m ones, downloads the first. No follow-up refresh call: the downloader already
+    registers the file (measured 2026-11-21, 46/46 downloaded items had the stream).
 3.  `run_fetch_loop.sh` — reruns step 2 until no un-attempted item is left. Needed because
     step 2 snapshots its work list at start, and step 1 is still adding ids.
 
@@ -58,7 +59,7 @@ import sqlite3;c=sqlite3.connect('/srv/apps/jellyfin/config/data/jellyfin.db')
 print(c.execute(\"select AccessToken from ApiKeys where Name='buffy-temp'\").fetchone()[0])" > /tmp/buffy.key
 sudo chmod 600 /tmp/buffy.key      # root-only; every script below runs under sudo
 
-# step 1 (hours), step 2+3 (days) — setsid so they survive the ssh session
+# step 1 (hours), step 2+3 (hours at 24 workers) — setsid so they survive the ssh session
 sudo setsid nohup python3 /srv/apps/jellyfin/subs/resolve_imdb.py >> /srv/apps/jellyfin/subs/resolve.out 2>&1 &
 sudo setsid nohup /srv/apps/jellyfin/subs/run_fetch_loop.sh >/dev/null 2>&1 &
 
@@ -92,15 +93,47 @@ limits step 2 to one show, `--limit N` to a smoke test, `--workers N` to change 
 | Playback check | `GET /Users/{uid}/Items/{id}` returns `English - SUBRIP - External` for fresh downloads |
 | Named titles | *I Want to Eat Your Pancreas* (2018) and Attack on Titan S02/S03 verified playable |
 
-Throughput is **~17 items/min sustained at `--workers 3`**, so a 1,400-item queue takes ~85 min
-and the full catalogue would take **~9 days** if every series resolves. Both jobs were left
-running; `MediaStreamInfos` row counts are *not* a progress signal (they are transient), count
-files or the API instead.
+Throughput is **~15 items/min at `--workers 3`**, so a 1,400-item queue takes ~90 min. That
+first run was too slow; see "Speeding it up" below. `MediaStreamInfos` row counts are *not* a
+progress signal (they are transient), count files or the API instead.
 
-Timing is worth stating plainly: step 1 is hours, step 2/3 is days, and it is I/O to Subf2m,
-not CPU. Do not raise `--workers` past 3 without measuring — Subf2m starts returning zero
-candidates for concurrent searches of the same series, and the IMDb endpoint throttles (at 6
-workers it returned empty `d`, logged as `http_fail`).
+## Speeding it up (measured 2026-11-21)
+
+Three findings, in order of impact.
+
+1.  **The Refresh call was unnecessary.** The download endpoint already registers the file,
+    so `fetch_subs.py` no longer POSTs `/Items/{id}/Refresh` afterwards. Removing it saved one
+    request per item and nothing else: 46 of 46 items checked through
+    `/Users/{uid}/Items/{id}` advertised `English - SUBRIP - External` without it.
+2.  **Worker count was the real limit.** A search costs ~10 s of remote latency, a download
+    0.02 s, and jellyfin sits at 0.02% CPU, so this is entirely Subf2m I/O. `bench_workers.py`
+    (in this directory) timed fresh item slices at several pool sizes:
+
+    | workers | measured (bench, movie slice) | median search | note |
+    | --- | --- | --- | --- |
+    | 3 | 14.8 items/min | 10.1 s | the original setting |
+    | 12 | 34.9 items/min | 15.2 s | |
+    | 24 | 45.6 items/min | 29.8 s | chosen |
+    | 40 | 45.8 items/min | 33.4 s | no gain; `HttpConnectionPool` connect timeouts in the log |
+
+    Past 24 workers Subf2m stops giving more throughput and jellyfin starts logging
+    `A connection could not be established within the configured ConnectTimeout`, so 24 is the
+    ceiling. `run_fetch_loop.sh` now passes `--workers 24`.
+3.  **Series batches run faster than movies.** The live queue at 24 workers did **~90
+    items/min sustained** over an 8-minute window (575 -> 1,275 items, `err 0`), well above the
+    45.6/min movie slice: episodes of one show repeat the same Subf2m lookup, so most of the
+    page is already warm. Expect the rate to swing between ~45 and ~125/min depending on
+    whether the current slice is movies or episodes.
+
+Measured effect on this catalogue: the 11,543-item ready queue went from ~12 h to ~2 h. Two
+verified samples: 10 of 14 freshly attempted movies advertised an external subtitle (the
+other 4 were `nosub`, no candidate on Subf2m), and `.srt` files rose 2,134 -> 2,707 while the
+measurement ran.
+
+To repeat the measurement, stop the loop first (an item can otherwise be downloaded by both
+processes), then run arms of `~36` items: `bench_workers.py --workers 3 --limit 36 --verify`,
+`--workers 24 --limit 36 --verify`. Both append to `attempted.txt`, so the work is not
+wasted.
 
 ## Verified how
 
@@ -139,6 +172,9 @@ them again:
 -   **~20% of titles never get an IMDb id** (obscure, foreign, misnamed), so they are never
     queued — the `READY` SQL in `fetch_subs.py` requires one. Check `resolve.log` for
     `fuzzy <name> [year] -> tt…` lines: those are matches by substring, occasionally wrong.
+-   **`resolve_imdb.py` stays at 3 workers.** IMDb's suggestion endpoint answers with an
+    empty `d` under more concurrency (seen at 6 workers, logged as `http_fail`), so only the
+    subtitle fetcher's pool was widened. Widening the resolver is a separate benchmark.
 -   Addic7ed's crash is inside the compiled plugin, unfixable here; the candidate filter
     (`"subf2m" in Id`) skips it deliberately.
 -   Subf2m may throttle or start answering with Cloudflare challenges over a multi-day run.

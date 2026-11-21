@@ -35,7 +35,8 @@ def process(row):
     if not cands: return mark(iid,"nosub")
     st,_=api("/Items/%s/RemoteSearch/Subtitles/%s"%(iid,urllib.parse.quote(cands[0]["Id"],safe="")),"POST")
     if st not in (200,204): return mark(iid,"err")
-    api("/Items/%s/Refresh?metadataRefreshMode=ValidationOnly&imageRefreshMode=ValidationOnly&replaceAllMetadata=false&replaceAllImages=false"%iid,"POST",60)
+    # No Refresh call: the download endpoint already registers the file (measured
+    # 2026-11-20 -- every item had the external subtitle in MediaSources without it).
     mark(iid,"ok")
 READY="""and (
     (b.Type like '%TV.Episode' and exists (select 1 from BaseItemProviders p where p.ItemId=b.SeriesId and p.ProviderId='Imdb'))
@@ -43,7 +44,7 @@ READY="""and (
 and not exists (select 1 from MediaStreamInfos m where m.ItemId=b.Id and m.StreamType=3 and m.IsExternal=1)"""
 def main():
     ap=argparse.ArgumentParser()
-    ap.add_argument("--series"); ap.add_argument("--limit",type=int,default=0); ap.add_argument("--workers",type=int,default=3)
+    ap.add_argument("--series"); ap.add_argument("--limit",type=int,default=0); ap.add_argument("--workers",type=int,default=24)
     a=ap.parse_args()
     done=set(l.strip() for l in open(ATTEMPTED)) if os.path.exists(ATTEMPTED) else set()
     c=sqlite3.connect("file:"+DB+"?mode=ro",uri=True)
