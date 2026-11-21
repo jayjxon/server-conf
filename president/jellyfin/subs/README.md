@@ -179,3 +179,27 @@ them again:
     (`"subf2m" in Id`) skips it deliberately.
 -   Subf2m may throttle or start answering with Cloudflare challenges over a multi-day run.
     If `ok` stops climbing, restart the loop after a pause.
+
+## The missing `node` (2026-11-21)
+
+One addition from the day the backfill was running: subbuzz needs a binary the image does
+not ship, so compose mounts one in.
+
+### `setup_node.sh` — the JavaScript challenge solver needs a binary the image lacks
+
+`Providers/Subf2m.cs` answers an `InvalidHtmlException` by running
+`node -e "console.log('__arcsjs='+eval(…))"` and setting the resulting cookie. The jellyfin
+image has no node, so that path could never work. The script installs a pinned static build
+(arm64 or x64, detected), copies it into the running container **without a restart**, and the
+compose file mounts the same file over `/usr/local/bin/node` so a recreate keeps it.
+
+```bash
+sudo ./setup_node.sh                     # /srv/apps/jellyfin/subs/bin/node, v22.11.0
+```
+
+Run it **before** the first `docker compose up -d`: a missing bind-mount source is created as
+a directory, which would shadow the binary. Measured on this host: aarch64, node v22.11.0,
+110 MB, runs as uid 1001 inside the container. Its effect on real challenges is **not yet
+measured** — no `Cookie set` line had appeared at the time of writing, because subbuzz still
+serves those pages from its four-hour search cache. Revert by removing the volume, deleting
+`/usr/local/bin/node` from the container and recreating; the plugin just logs the old failure.
