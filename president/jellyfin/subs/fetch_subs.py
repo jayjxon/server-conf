@@ -11,6 +11,11 @@ def base_url():
     if not ips: raise SystemExit("jellyfin has no container IP")
     return "http://"+ips[0]+":8096"
 BASE=base_url(); lock=threading.Lock(); counters={"ok":0,"nosub":0,"err":0}
+def refresh_base():
+    global BASE
+    new=base_url()
+    if new!=BASE: log("jellyfin moved: %s -> %s"%(BASE,new))
+    BASE=new
 def log(m):
     with lock:
         open(LOG,"a").write(time.strftime("%F %T ")+m+"\n"); print(m,flush=True)
@@ -21,7 +26,17 @@ def api(path,method="GET",timeout=120):
     try:
         with urllib.request.urlopen(req,timeout=timeout) as r: return r.status,r.read()
     except urllib.error.HTTPError as e: return e.code,e.read()[:300]
-    except Exception as e: return 0,str(e)[:300].encode()
+    except Exception as e:
+        # A recreate gives the container a new IP and this process cached the old one. Every
+        # search then fails instantly and gets marked err (2026-11-21: 50,677 items lost in one
+        # deploy). Re-resolve the address once before giving up on the item.
+        try: refresh_base()
+        except Exception: pass
+        req=urllib.request.Request(BASE+path,method=method,headers=h)
+        try:
+            with urllib.request.urlopen(req,timeout=timeout) as r: return r.status,r.read()
+        except urllib.error.HTTPError as e2: return e2.code,e2.read()[:300]
+        except Exception as e2: return 0,str(e2)[:300].encode()
 def mark(iid,status):
     with lock:
         open(ATTEMPTED,"a").write(iid+"\n"); counters[status]+=1

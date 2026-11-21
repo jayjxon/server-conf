@@ -179,6 +179,12 @@ them again:
     (`"subf2m" in Id`) skips it deliberately.
 -   Subf2m may throttle or start answering with Cloudflare challenges over a multi-day run.
     If `ok` stops climbing, restart the loop after a pause.
+-   **A container recreate changes the IP `fetch_subs.py` talks to.** The runner resolves the
+    address once at startup, so a `docker compose up -d` during a run makes every search fail
+    instantly and be written to `attempted.txt` as `err` (2026-11-21: 50,677 items in under a
+    minute, all recoverable only by trimming the file). Since that day `api()` re-resolves the
+    address once on a connection error, but the honest rule is still: recreate jellyfin while
+    the loop is stopped.
 
 ## The missing `node` (2026-11-21)
 
