@@ -56,6 +56,8 @@ SUBTITLE_BATCH = max(1, int(os.environ.get("SUBTITLE_BATCH", "6")))
 SUBTITLE_MAX_ATTEMPTS = max(
     1, int(os.environ.get("SUBTITLE_MAX_ATTEMPTS", "12"))
 )
+# bump to make existing "done" entries prove their subtitle tracks again
+SUBTITLE_STATE_VERSION = 2
 
 _BAD_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _YEAR_IN_TITLE = re.compile(
@@ -1217,6 +1219,16 @@ class Fulfiller:
 
     def ensure_pending_subtitles(self) -> None:
         """Backfill subtitles even when Seerr no longer lists the request."""
+        if self.state.get("subtitles_version") != SUBTITLE_STATE_VERSION:
+            # The old completion test trusted a sidecar filename and could mark
+            # a series done while episodes were still missing subtitles.
+            for item in self.state["items"].values():
+                if self._strm_files(item) and item.get("subtitles") == "done":
+                    item["subtitles"] = "pending"
+                    item.pop("subtitle_attempts", None)
+            self.state["subtitles_version"] = SUBTITLE_STATE_VERSION
+            self._save_state()
+        refreshed = False
         for item in list(self.state["items"].values()):
             if not self._strm_files(item):
                 continue
@@ -1226,8 +1238,9 @@ class Fulfiller:
                 item["subtitles"] = "pending"
             downloaded = self._ensure_external_subtitles(item)
             self._save_state()
-            if downloaded:
-                self._refresh_jellyfin()
+            refreshed = refreshed or downloaded
+        if refreshed:
+            self._refresh_jellyfin()
 
     def reconcile(self) -> None:
         changed = False
