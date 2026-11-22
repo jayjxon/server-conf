@@ -21,10 +21,9 @@ services:
             - ${APP_ROOT}/jellyfin/cache:/cache
             # no /dev/dri and no GPU reservation: this host is a VPS without
             # hardware transcoding, the library lives under APP_ROOT instead
+            # request-only VOD tree; the fulfiller writes one .strm/.nfo per approved
+            # title here, and the anime handler writes its own sub/dub trees under it
             - ${APP_ROOT}/jellyfin/media:/data
-            # dispatcharr's generated VOD library (one .strm per title), read-only so a
-            # jellyfin scan can never touch the plugin's output
-            - ${APP_ROOT}/dispatcharr/vods:/data/vods:ro
             # subbuzz's Subf2m provider shells out to `node` to answer the site's JavaScript
             # challenge, and the image ships none. the file comes from subs/setup_node.sh and
             # must exist before the first `up -d`: a missing host path is created as a

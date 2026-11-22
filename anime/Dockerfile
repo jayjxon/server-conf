@@ -4,7 +4,7 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-COPY catalog.py anime_library.py anime_library_ui.html ./
+COPY catalog.py anime_library.py ./
 
 EXPOSE 8787
 

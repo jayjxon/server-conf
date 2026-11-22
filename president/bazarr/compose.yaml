@@ -1,9 +1,9 @@
 services:
-    # subtitle manager for the VOD library. jellyfin's own subtitle support is the
-    # opensubtitles plugin, which needs an account and can only fetch what a provider
-    # already has; bazarr's embedded subtitles provider instead pulls the text tracks
-    # that are already inside each title and writes them out as a sidecar, which costs
-    # no download and is always in sync with the release
+    # subtitle manager for the request-only VOD library. jellyfin's own subtitle
+    # support is the opensubtitles plugin, which needs an account and can only fetch
+    # what a provider already has; bazarr's embedded subtitles provider instead pulls
+    # the text tracks that are already inside each title and writes them out as a
+    # sidecar, which costs no download and is always in sync with the release
     bazarr:
         image: lscr.io/linuxserver/bazarr:latest
         container_name: bazarr
@@ -19,11 +19,10 @@ services:
             TZ: ${TZ:-Etc/UTC}
         volumes:
             - ${APP_ROOT}/bazarr/config:/config
-            # the same tree jellyfin mounts read-only at /data/vods, and deliberately the
-            # same path here. it has to be writable on this side: the extracted subtitle
-            # lands as a sidecar .srt next to the .strm, which is the only place jellyfin
-            # looks for an external subtitle on a .strm item
-            - ${APP_ROOT}/dispatcharr/vods:/data/vods
+            # the fulfiller creates one .strm/.nfo per approved title here; this is
+            # deliberately the same tree jellyfin mounts, and writable because the
+            # extracted subtitle lands as a sidecar .srt next to the .strm
+            - ${APP_ROOT}/jellyfin/media/requests:/data/requests
         expose:
             - 6767
         networks:

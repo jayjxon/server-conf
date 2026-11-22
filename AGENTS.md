@@ -172,6 +172,20 @@ Known gaps, currently deliberate rather than fixed:
 -   Images carry `latest`/`stable` tags (`jellyfin`, `caddy`, `dispatcharr`, `bazarr`,
     `error-pages`, `pingvin`, `gluetun`, `tailscale`), so any `pull` is an unreviewed upgrade.
 
+## Jellyfin API keys
+
+- `X-Emby-Key` / `X-Emby-Token` do **not** authenticate against this Jellyfin
+  (they return `401`). Use the `Authorization` header instead:
+
+  ```bash
+  curl -H 'Authorization: MediaBrowser Token="<key>"' \
+      http://jellyfin:8096/System/Info
+  ```
+
+  The key lives in the `ApiKeys` table; `/Auth/Keys` lists it. This was verified
+  on 2026-11-22, and it is why the fulfiller sends `Authorization`, not
+  `X-Emby-Token`.
+
 ## Posters for the VOD library
 
 `president/jellyfin/images/fetch_posters.py` queues a poster refresh for the 3,039 movies and
@@ -245,6 +259,14 @@ packet is dropped), plus a Tailscale auth key. Advertising is not enough — the
 be approved in the tailnet, and the exit-node route enabled, before clients can select it.
 Until the machine is approved the container exits and restarts in a loop; that is the image's
 auth flow, not a crash.
+
+Forwarding is a host sysctl, not a container setting: `/proc/sys` is read-only inside the
+container, and the node shares the host's netns, so `net.ipv4.ip_forward` and
+`net.ipv6.conf.all.forwarding` come from `/etc/sysctl.d/99-tailscale-exit-node.conf` on the
+host. With IPv6 forwarding off, tailscaled reports `Subnet routing is enabled, but IP
+forwarding is disabled` and the node stays at `ExitNodeOption: false` — advertising
+`0.0.0.0/0` and `::/0` in prefs is not enough for it to be offered. That drop-in is host
+state and is not tracked here; recreate it on a fresh host before approving the node.
 
 ## Deploying
 

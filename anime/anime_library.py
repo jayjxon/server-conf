@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-anime_library.py - a small web app for curating an anime library in Jellyfin.
+anime_library.py - the API-only anime library service for Jellyfin.
 
 It reads a /data/* catalogue through catalog.py, caches the JSON on disk, and
 writes Jellyfin-ready `.strm` files into a media mount.  The URLs inside those
@@ -24,7 +24,7 @@ Subtitles are written as sidecars next to each `.strm`
 
 Sub and dub are separate trees because Jellyfin cannot treat two independent
 HLS sources as two versions of one episode.  Add each tree as its own Jellyfin
-library; the UI shows the exact paths.
+library.
 
 Only the Python standard library is used.  catalog.py must sit next to this
 file, or be importable on PYTHONPATH.
@@ -511,11 +511,6 @@ class App:
         self._resolve_lock = threading.Lock()
         self._resolve_cache = {}
 
-        ui_path = Path(__file__).with_name("anime_library_ui.html")
-        if not ui_path.is_file():
-            raise CatalogError(f"UI file is missing: {ui_path}")
-        self.ui_bytes = ui_path.read_bytes()
-
     # -- logging -----------------------------------------------------------
 
     def log(self, message: str) -> None:
@@ -563,6 +558,8 @@ class App:
         return {
             "slug": show.slug,
             "title": show.title,
+            "alternative": show.get("alternative") or "",
+            "titles": show.get("titles") or "",
             "year": show.get("year"),
             "type": show.get("type") or "",
             "score": show.get("score"),
@@ -589,12 +586,20 @@ class App:
             if name:
                 genres.append(str(name))
         detail = self._card(show)
+        seasons = set()
+        for episode in episodes:
+            value = episode.get("season_number") or episode.get("season") or 1
+            try:
+                seasons.add(int(value))
+            except (TypeError, ValueError):
+                seasons.add(1)
         detail.update({
             "description": plain_description(
                 show.get("description") or show.get("short_description") or ""),
             "genres": genres,
             "kind": "movie" if LibraryWriter._is_movie(show) else "series",
             "episode_total": len(episodes),
+            "season_total": len(seasons) or 1,
             "episodes": [
                 {"number": LibraryWriter._episode_number(ep, index),
                  "title": ep.title or ""}
@@ -913,12 +918,7 @@ class Handler(BaseHTTPRequestHandler):
 
             if command in ("GET", "HEAD"):
                 if path in ("/", "/index.html"):
-                    return self._serve_ui()
-                if path == "/favicon.ico":
-                    self.send_response(204)
-                    self.send_header("Content-Length", "0")
-                    self.end_headers()
-                    return None
+                    return self._error(404, "UI removed; use the JSON API")
                 if path == "/api/config":
                     return self._json(200, app.config())
                 if path == "/api/selected":
@@ -970,11 +970,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._error(500, "internal server error")
             except Exception:
                 pass
-
-    def _serve_ui(self):
-        body = self.server.app.ui_bytes
-        self._send_bytes(200, body, "text/html; charset=utf-8",
-                         head_only=(self.command == "HEAD"), cache="no-store")
 
     # -- playback ----------------------------------------------------------
 

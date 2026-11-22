@@ -27,9 +27,6 @@ services:
             DISPATCHARR_TRUSTED_PROXIES: 10.120.0.0/24
         volumes:
             - ${APP_ROOT}/dispatcharr/data:/data
-            # the vod -> media library plugin writes the .strm/.nfo tree here; jellyfin
-            # mounts the same host directory read-only, so both sides see one copy
-            - ${APP_ROOT}/dispatcharr/vods:/VODS
         expose:
             - 9191
         networks:

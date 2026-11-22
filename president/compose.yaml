@@ -13,6 +13,8 @@ include:
     - ./jellyfin/compose.yaml
     - ./anime-library/compose.yaml
     - ./dispatcharr/compose.yaml
+    - ./seerr/compose.yaml
+    - ./fulfiller/compose.yaml
     - ./bazarr/compose.yaml
     - ./pingvin/compose.yaml
     - ./static/compose.yaml

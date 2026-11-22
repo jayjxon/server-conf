@@ -1,0 +1,43 @@
+services:
+    fulfiller:
+        # same image and network namespace as dispatcharr: the VOD database lives
+        # inside that container, so localhost is the only route to it
+        image: ghcr.io/dispatcharr/dispatcharr:latest
+        container_name: fulfiller
+        restart: unless-stopped
+        network_mode: 'service:dispatcharr'
+        depends_on:
+            - dispatcharr
+            - seerr
+            - anime-library
+        security_opt:
+            - no-new-privileges:true
+        pids_limit: 100
+        user: ${PUID}:${PGID}
+        environment:
+            TZ: ${TZ:-Etc/UTC}
+            PYTHONUNBUFFERED: '1'
+            PYTHONDONTWRITEBYTECODE: '1'
+            DJANGO_SECRET_KEY: ${DISPATCHARR_SECRET_KEY:?generate one, see the README}
+            DISPATCHARR_ENV: aio
+            REDIS_HOST: localhost
+            SEERR_URL: http://seerr:5055
+            SEERR_API_KEY: ${SEERR_API_KEY:?set SEERR_API_KEY, see example.env}
+            JELLYFIN_URL: http://jellyfin:8096
+            JELLYFIN_API_KEY: ${JELLYFIN_API_KEY:-}
+            DISPATCHARR_PUBLIC_URL: https://dispatcharr.${DOMAINNAME}
+            ANIME_LIBRARY_URL: http://anime-library:8787
+            ANIME_LANG: ${ANIME_LANG:-dub}
+            LIBRARY_DIR: /library
+            STATE_DIR: /state
+            POLL_SECONDS: ${FULFILLER_POLL_SECONDS:-30}
+            RECONCILE_SECONDS: ${FULFILLER_RECONCILE_SECONDS:-21600}
+        volumes:
+            - ${APP_ROOT}/dispatcharr/data:/data:ro
+            - ${APP_ROOT}/jellyfin/media/requests:/library
+            - ${APP_ROOT}/fulfiller:/state
+            - ./fulfiller.py:/fulfiller.py:ro
+        entrypoint:
+            - python
+        command:
+            - /fulfiller.py

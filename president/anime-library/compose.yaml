@@ -27,12 +27,7 @@ services:
         labels:
             traefik.enable: true
             traefik.http.routers.anime-library-rtr.rule: Host(`anime.${DOMAINNAME}`)
-            # the UI and API need authelia; /play and /p are explicitly bypassed
+            # the JSON API needs authelia; /play and /p are explicitly bypassed
             # in authelia's configuration because jellyfin/players fetch them directly
             traefik.http.routers.anime-library-rtr.middlewares: middlewares-authelia@file
             traefik.http.services.anime-library-svc.loadbalancer.server.port: 8787
-
-            homepage.group: media
-            homepage.name: Anime Library
-            homepage.icon: mdi-television-classic
-            homepage.href: https://anime.${DOMAINNAME}
