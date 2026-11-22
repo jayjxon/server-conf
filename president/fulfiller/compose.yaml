@@ -34,6 +34,8 @@ services:
             STATE_DIR: /state
             POLL_SECONDS: ${FULFILLER_POLL_SECONDS:-30}
             RECONCILE_SECONDS: ${FULFILLER_RECONCILE_SECONDS:-21600}
+            RETRY_SECONDS: ${FULFILLER_RETRY_SECONDS:-300}
+            RETRY_ATTEMPTS: ${FULFILLER_RETRY_ATTEMPTS:-2}
         volumes:
             - ${APP_ROOT}/dispatcharr/data:/data:ro
             - ${APP_ROOT}/jellyfin/media/requests:/library

@@ -45,6 +45,10 @@ STATE_DIR = Path(os.environ.get("STATE_DIR", "/state"))
 STATE_FILE = STATE_DIR / "state.json"
 POLL_SECONDS = max(10, int(os.environ.get("POLL_SECONDS", "30")))
 RECONCILE_SECONDS = max(300, int(os.environ.get("RECONCILE_SECONDS", "21600")))
+# hold a pending request this long before retrying it; upstream outages are
+# common enough that declining on the first 5xx loses the request for good
+RETRY_SECONDS = max(0, int(os.environ.get("RETRY_SECONDS", "300")))
+RETRY_ATTEMPTS = max(0, int(os.environ.get("RETRY_ATTEMPTS", "2")))
 HTTP_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "30"))
 SUBTITLE_LANGUAGE = os.environ.get("SUBTITLE_LANGUAGE", "eng").strip() or "eng"
 
@@ -405,6 +409,7 @@ class Fulfiller:
         self.anime = Anime(ANIME_LIBRARY_URL, ANIME_LANG)
         self.pressplayz = PressPlayZ(PRESS_PLAYZ_LIBRARY_URL)
         self.state = self._load_state()
+        self.state.setdefault("retries", {})
         self._jellyfin_uid = None
 
     @staticmethod
@@ -991,6 +996,11 @@ class Fulfiller:
             count = details.get("seasons") or 0
             requested_seasons = list(range(1, count + 1))
         details["_seasons"] = requested_seasons
+        retries = self.state.setdefault("retries", {})
+        retry_key = str(request_id)
+        retry = retries.get(retry_key) or {}
+        if pending and float(retry.get("at") or 0) > time.time():
+            return
         key = f"{media_type}:{tmdb_id}"
         previous = self.state["items"].get(key) or {}
         if not pending and previous.get("kind") == "anime" and previous.get("slug"):
@@ -1032,13 +1042,29 @@ class Fulfiller:
         if not result:
             result = self._vprint(media_type, tmdb_id, details)
         if result:
+            retries.pop(retry_key, None)
             result = self._with_subtitle_state(result, previous)
         if not result:
             if pending:
-                if self.seerr.decline(request_id):
+                attempts = _int(retry.get("attempts"), 0)
+                if attempts < RETRY_ATTEMPTS:
+                    retries[retry_key] = {
+                        "at": time.time() + RETRY_SECONDS,
+                        "attempts": attempts + 1,
+                    }
+                    self._save_state()
                     log(
-                        f"declined {media_type} {tmdb_id}: no anime/Dispatcharr match"
+                        f"no match for {media_type} {tmdb_id}; retry "
+                        f"{attempts + 1}/{RETRY_ATTEMPTS} in {RETRY_SECONDS}s"
                     )
+                else:
+                    retries.pop(retry_key, None)
+                    self._save_state()
+                    if self.seerr.decline(request_id):
+                        log(
+                            f"declined {media_type} {tmdb_id}: no "
+                            f"anime/Dispatcharr match after {attempts} retries"
+                        )
             else:
                 log(f"approved {media_type} {tmdb_id}: no anime/Dispatcharr match")
             return
