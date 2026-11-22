@@ -37,7 +37,6 @@ ANIME_LIBRARY_URL = os.environ.get(
     "ANIME_LIBRARY_URL", "http://anime-library:8787"
 ).rstrip("/")
 ANIME_LANG = os.environ.get("ANIME_LANG", "dub").strip().lower()
-CINECAT_LIBRARY_URL = os.environ.get("CINECAT_LIBRARY_URL", "").rstrip("/")
 FRAMEX_LIBRARY_URL = os.environ.get("FRAMEX_LIBRARY_URL", "").rstrip("/")
 LIBRARY_DIR = Path(os.environ.get("LIBRARY_DIR", "/library"))
 STATE_DIR = Path(os.environ.get("STATE_DIR", "/state"))
@@ -360,8 +359,8 @@ class Anime:
         return True
 
 
-class Cinecat:
-    """Client for the local CineCat 1080p selector/proxy."""
+class Framex:
+    """Client for the local FramexTV 1080p selector/proxy."""
 
     def __init__(self, base: str):
         self.base = base.rstrip("/")
@@ -385,20 +384,16 @@ class Cinecat:
                 timeout=300,
             )
         except (urllib.error.URLError, OSError) as exc:
-            log(f"cinecat select failed: {exc}")
+            log(f"framex select failed: {exc}")
             return None
         if code == 404:
             return None
         if code != 200 or not isinstance(data, dict):
             detail = data.get("error") if isinstance(data, dict) else ""
-            log(f"cinecat select returned HTTP {code}: {detail}")
+            log(f"framex select returned HTTP {code}: {detail}")
             return None
         selection = data.get("selection")
         return selection if isinstance(selection, dict) else None
-
-
-class Framex(Cinecat):
-    """Client for the local FramexTV 1080p selector/proxy."""
 
 
 class Fulfiller:
@@ -406,7 +401,6 @@ class Fulfiller:
         self.seerr = Seerr(SEERR_URL, SEERR_API_KEY)
         self.vod = VodCatalog()
         self.anime = Anime(ANIME_LIBRARY_URL, ANIME_LANG)
-        self.cinecat = Cinecat(CINECAT_LIBRARY_URL)
         self.framex = Framex(FRAMEX_LIBRARY_URL)
         self.state = self._load_state()
         self._jellyfin_uid = None
@@ -659,29 +653,6 @@ class Fulfiller:
             "year": details.get("year") or candidate.get("year"),
             "slug": slug,
             "files": [],
-        }
-
-    def _cinecat(self, details: dict):
-        selection = self.cinecat.select(details)
-        if not selection:
-            return None
-        files = []
-        for name in selection.get("files") or []:
-            text = str(name)
-            # cinecat-library writes /data/requests; the fulfiller mounts that
-            # same tree at /library. Keep state paths in the fulfiller namespace.
-            marker = "/data/requests/"
-            if text.startswith(marker):
-                text = str(LIBRARY_DIR / text[len(marker):])
-            files.append(text)
-        return {
-            "kind": "cinecat",
-            "media_type": details["media_type"],
-            "tmdb_id": details.get("tmdb_id"),
-            "title": details.get("title") or selection.get("title"),
-            "year": details.get("year") or selection.get("year"),
-            "seasons": selection.get("seasons") or [],
-            "files": files,
         }
 
     def _framex(self, details: dict):
@@ -1033,7 +1004,7 @@ class Fulfiller:
                 media_type == "movie"
                 or set(requested_seasons).issubset(materialized)
                 or (
-                    previous.get("kind") not in ("cinecat", "framex")
+                    previous.get("kind") != "framex"
                     and not self._has_unmaterialized_season(
                         tmdb_id, requested_seasons, materialized
                     )
@@ -1056,8 +1027,6 @@ class Fulfiller:
         result = self._anime(details)
         if not result:
             result = self._framex(details)
-        if not result:
-            result = self._cinecat(details)
         if not result:
             result = self._vprint(media_type, tmdb_id, details)
         if result:
@@ -1105,8 +1074,6 @@ class Fulfiller:
             result = self._anime(details)
             if not result:
                 result = self._framex(details)
-            if not result:
-                result = self._cinecat(details)
             if result:
                 # The request was fulfilled from VOD before a preferred source
                 # was available; replace those files with the new selection.

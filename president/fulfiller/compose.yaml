@@ -10,7 +10,6 @@ services:
             - dispatcharr
             - seerr
             - anime-library
-            - cinecat-library
             - framex-library
         security_opt:
             - no-new-privileges:true
@@ -30,7 +29,6 @@ services:
             DISPATCHARR_PUBLIC_URL: https://dispatcharr.${DOMAINNAME}
             ANIME_LIBRARY_URL: http://anime-library:8787
             ANIME_LANG: ${ANIME_LANG:-dub}
-            CINECAT_LIBRARY_URL: http://cinecat-library:8788
             FRAMEX_LIBRARY_URL: http://framex-library:8789
             LIBRARY_DIR: /library
             STATE_DIR: /state

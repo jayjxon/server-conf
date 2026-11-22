@@ -12,7 +12,6 @@ include:
     # services
     - ./jellyfin/compose.yaml
     - ./anime-library/compose.yaml
-    - ./cinecat-library/compose.yaml
     - ./framex-library/compose.yaml
     - ./stream-gateway/compose.yaml
     - ./dispatcharr/compose.yaml

@@ -263,7 +263,7 @@ class Source:
         )
 
     def english_vtt(self, media_type: str, tmdb_id: int, season=None, episode=None):
-        """Return the first English VTT track, if CineCat has one."""
+        """Return the first English VTT track, if the upstream has one."""
         if not self.subs_base:
             return None
         if media_type == "movie":
@@ -615,6 +615,12 @@ class App:
         self.signer = Signer(self.data_dir / "proxy.secret")
         self._resolve_lock = threading.Lock()
         self._resolve_cache = {}
+        # resolved variant URLs are reused for a while; misses are cached too so a
+        # title the source does not carry is not re-queried on every playback
+        self._resolve_ttl = float(os.environ.get("FRAMEX_RESOLVE_TTL", "600"))
+        self._resolve_miss_ttl = float(
+            os.environ.get("FRAMEX_RESOLVE_MISS_TTL", "300")
+        )
         self.timeout = source.timeout
         rewritten = self.writer.rewrite_stream_urls(
             self.writer.state["selections"].values()
@@ -650,19 +656,41 @@ class App:
         }
         return self.writer.write(fields, self.source)
 
+    def _remember(self, key, stamp: float, value, referer) -> None:
+        with self._resolve_lock:
+            self._resolve_cache[key] = (stamp, value, referer)
+            if len(self._resolve_cache) > 1024:
+                ttl = max(self._resolve_ttl, self._resolve_miss_ttl)
+                self._resolve_cache = {
+                    entry: cached
+                    for entry, cached in self._resolve_cache.items()
+                    if stamp - cached[0] < ttl
+                }
+
     def _resolve(self, media_type: str, tmdb_id: int, season=None, episode=None):
         key = (media_type, int(tmdb_id), _int(season), _int(episode))
         now = time.time()
         with self._resolve_lock:
             cached = self._resolve_cache.get(key)
-            if cached and now - cached[0] < 120:
-                return cached[1], cached[2]
-        variant = self.source.choose_1080p(
-            media_type, tmdb_id, season=season, episode=episode
-        )
+            if cached:
+                stamp, value, referer = cached
+                ttl = (
+                    self._resolve_ttl if referer is not None
+                    else self._resolve_miss_ttl
+                )
+                if now - stamp < ttl:
+                    if referer is None:
+                        raise value
+                    return value, referer
+        try:
+            variant = self.source.choose_1080p(
+                media_type, tmdb_id, season=season, episode=episode
+            )
+        except (NoSource, FramexError) as exc:
+            self._remember(key, now, exc, None)
+            raise
         referer = self.source.site_url + "/"
-        with self._resolve_lock:
-            self._resolve_cache[key] = (now, variant, referer)
+        self._remember(key, now, variant, referer)
         return variant, referer
 
     def manifest(self, media_type: str, tmdb_id: int, season=None, episode=None) -> str:

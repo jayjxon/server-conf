@@ -549,6 +549,12 @@ class App:
         self._mutation_lock = threading.Lock()
         self._resolve_lock = threading.Lock()
         self._resolve_cache = {}
+        # resolved manifest URLs are reused for a while; misses are cached too so
+        # an unavailable episode is not re-resolved on every playback
+        self._resolve_ttl = float(os.environ.get("ANIME_RESOLVE_TTL", "600"))
+        self._resolve_miss_ttl = float(
+            os.environ.get("ANIME_RESOLVE_MISS_TTL", "300")
+        )
         rewritten = self.library.rewrite_stream_urls(
             self.state.load().get("selections") or []
         )
@@ -792,6 +798,17 @@ class App:
             pass
         return player_link or manifest
 
+    def _remember(self, key, stamp: float, value, referer) -> None:
+        with self._resolve_lock:
+            self._resolve_cache[key] = (stamp, value, referer)
+            if len(self._resolve_cache) > 1024:
+                ttl = max(self._resolve_ttl, self._resolve_miss_ttl)
+                self._resolve_cache = {
+                    entry: cached
+                    for entry, cached in self._resolve_cache.items()
+                    if stamp - cached[0] < ttl
+                }
+
     def resolve_manifest(self, slug: str, number, lang: str):
         if lang not in ("sub", "dub"):
             raise ValueError("lang must be sub or dub")
@@ -799,8 +816,16 @@ class App:
         now = time.time()
         with self._resolve_lock:
             cached = self._resolve_cache.get(key)
-            if cached and now - cached[0] < 120:
-                return cached[1], cached[2]
+            if cached:
+                stamp, value, referer = cached
+                ttl = (
+                    self._resolve_ttl if referer is not None
+                    else self._resolve_miss_ttl
+                )
+                if now - stamp < ttl:
+                    if referer is None:
+                        raise value
+                    return value, referer
 
         show = self.catalog.show(slug)
         episode = None
@@ -809,7 +834,9 @@ class App:
         if episode is None:
             episodes = show.episodes
             if not episodes:
-                raise NoStream(f"{show.slug} has no episodes")
+                missing = NoStream(f"{show.slug} has no episodes")
+                self._remember(key, now, missing, None)
+                raise missing
             episode = episodes[0]
         server = episode.server(lang=lang)
         try:
@@ -817,12 +844,12 @@ class App:
         except CatalogError as exc:
             self.log(f"resolve failed {slug} {number} {lang} "
                      f"server={server.name}: {exc}")
+            self._remember(key, now, exc, None)
             raise
         self.log(f"resolve ok {slug} {number} {lang} server={server.name} "
                  f"-> {_short_url(manifest)}")
         referer = self._referer_for(server.url, manifest)
-        with self._resolve_lock:
-            self._resolve_cache[key] = (now, manifest, referer)
+        self._remember(key, now, manifest, referer)
         return manifest, referer
 
     def rewrite_manifest(self, text: str, base_url: str, referer: str) -> str:

@@ -10,6 +10,9 @@ It does not name a provider. It asks the configured source services in order
 and returns the first playable HLS manifest. A source can be replaced or
 reimplemented behind its service URL without changing any `.strm` files.
 
+Resolved manifests (and misses) are cached for a short TTL so a player that
+re-requests a playlist does not re-run the upstream resolution.
+
 Only the Python standard library is used.
 """
 
@@ -19,6 +22,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
@@ -30,7 +34,6 @@ USER_AGENT = "framex-gateway/1.0"
 MEDIA_PATH_RE = re.compile(r"^/play/(?:movie/\d+|tv/\d+/\d+/\d+)/?$")
 SOURCES = (
     ("framex", os.environ.get("FRAMEX_LIBRARY_URL", "http://framex-library:8789")),
-    ("cinecat", os.environ.get("CINECAT_LIBRARY_URL", "http://cinecat-library:8788")),
 )
 
 
@@ -45,9 +48,35 @@ class Gateway:
             for name, base in sources
             if base and base.rstrip("/")
         ]
+        self.cache_ttl = float(os.environ.get("GATEWAY_CACHE_TTL", "60"))
+        self.cache_miss_ttl = float(os.environ.get("GATEWAY_CACHE_MISS_TTL", "60"))
+        self.cache_max = int(os.environ.get("GATEWAY_CACHE_MAX", "512"))
+        self._cache = {}
+        self._cache_lock = threading.Lock()
+
+    def _remember(self, path: str, body, source: str, stamp: float) -> None:
+        with self._cache_lock:
+            self._cache[path] = (stamp, body, source)
+            if len(self._cache) > self.cache_max:
+                ttl = max(self.cache_ttl, self.cache_miss_ttl)
+                self._cache = {
+                    key: value
+                    for key, value in self._cache.items()
+                    if stamp - value[0] < ttl
+                }
 
     def resolve(self, path: str):
         """Return (status, body, source) for the first usable source."""
+        now = time.time()
+        with self._cache_lock:
+            cached = self._cache.get(path)
+            if cached:
+                stamp, body, source = cached
+                ttl = self.cache_ttl if body is not None else self.cache_miss_ttl
+                if now - stamp < ttl:
+                    if body is None:
+                        return 404, b"", ""
+                    return 200, body, source
         headers = {
             "Accept": "application/vnd.apple.mpegurl,*/*",
             "User-Agent": USER_AGENT,
@@ -61,6 +90,7 @@ class Gateway:
                 ) as response:
                     body = response.read()
                     if response.status == 200 and body.lstrip().startswith(b"#EXTM3U"):
+                        self._remember(path, body, name, now)
                         return 200, body, name
                     failures.append(f"{name}: HTTP {response.status}")
             except HTTPError as exc:
@@ -68,6 +98,7 @@ class Gateway:
             except (URLError, OSError, ValueError) as exc:
                 failures.append(f"{name}: {type(exc).__name__}")
         log(f"no source for {path}: {'; '.join(failures) or 'none configured'}")
+        self._remember(path, None, "", now)
         return 404, b"", ""
 
 
