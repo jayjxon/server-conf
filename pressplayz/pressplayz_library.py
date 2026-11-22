@@ -8,9 +8,10 @@ TMDB id. It writes Jellyfin-ready `.strm` files pointing at the stable gateway
 (`/play/...`) and proxies the resolved manifest's segments with the upstream
 headers.
 
-VidNest exposes several upstreams per title (Nova/Comet/Zenith/Raven). This
-adapter walks them in order and takes the first HLS answer, preferring one that
-offers 1080p. Direct MP4 and DASH answers are skipped: Jellyfin's `.strm`
+CNO (beta.cno.to) is asked first, because it usually resolves directly from a
+TMDB id without going through the VidNest API. VidNest remains the fallback:
+its upstreams (Nova/Comet/Zenith/Raven) are walked in order, taking the first
+HLS answer. Direct MP4 and DASH answers are skipped: Jellyfin's `.strm`
 playback here is HLS-only.
 
 Wire contract:
@@ -36,6 +37,7 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import sys
 import threading
 import time
@@ -50,6 +52,7 @@ from xml.sax.saxutils import escape as xml_escape
 DEFAULT_PORT = 8789
 DEFAULT_API_BASE = "https://vidnest.pro"
 DEFAULT_SITE_URL = "https://pressplayz.top"
+DEFAULT_CNO_BASE = "https://beta.cno.to"
 # the key the VidNest web player sends; it is public in the site's JS bundle
 DEFAULT_PLAYER_KEY = "3a67e8866ae1d2bb9e81fe7f73315a56eb3bdf5e3e755c7554c8be6910aa6b13"
 # Nova (the default) only has movies. Comet covers most of Severance S1, Raven
@@ -131,7 +134,8 @@ def _looks_like_media(head: bytes) -> bool:
         return False
     if head.startswith(b"\x47"):
         return True
-    if len(head) >= 8 and head[4:8] == b"ftyp":
+    # fMP4: the init segment starts with ftyp, media segments with moof/styp
+    if len(head) >= 8 and head[4:8] in (b"ftyp", b"moof", b"styp", b"sidx"):
         return True
     if head.startswith(b"\x1a\x45\xdf\xa3"):
         return True
@@ -157,6 +161,7 @@ class Source:
         player_key: str = DEFAULT_PLAYER_KEY,
         sources: str = DEFAULT_SOURCES,
         max_height: int = DEFAULT_MAX_HEIGHT,
+        cno_base: str = DEFAULT_CNO_BASE,
         timeout: float = 20.0,
     ):
         self.api_base = api_base.rstrip("/")
@@ -164,16 +169,29 @@ class Source:
         self.player_key = player_key
         self.sources = [part.strip() for part in sources.split(",") if part.strip()]
         self.max_height = _int(max_height, DEFAULT_MAX_HEIGHT) or 0
+        self.cno_base = (cno_base or "").rstrip("/")
         self.timeout = float(timeout)
         # the player only accepts requests carrying its own page as the referer
         self.referer = self.api_base + "/"
 
-    def _headers(self, accept: str = "application/json") -> dict:
+    def referer_for(self, url: str) -> str:
+        """Pick the page a request should look like it came from.
+
+        VidNest wants its own origin; CNO's CDN rejects that referer with a 403.
+        """
+        if self.cno_base:
+            cno = urlsplit(self.cno_base)
+            target = urlsplit(url)
+            if cno.netloc and target.netloc == cno.netloc:
+                return f"{cno.scheme}://{cno.netloc}/"
+        return self.referer
+
+    def _headers(self, accept: str = "application/json", url: str = "") -> dict:
         headers = {
             "Accept": accept,
             "Accept-Encoding": "identity",
             "User-Agent": USER_AGENT,
-            "Referer": self.referer,
+            "Referer": self.referer_for(url) if url else self.referer,
         }
         if self.player_key:
             headers["x-player-key"] = self.player_key
@@ -204,7 +222,7 @@ class Source:
     def _fetch(self, url: str, accept: str = "application/json", limit: int = 0):
         if not self._allowed_url(url):
             raise PressError(f"blocked untrusted upstream URL: {url}")
-        request = Request(url, headers=self._headers(accept))
+        request = Request(url, headers=self._headers(accept, url))
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 body = response.read(limit) if limit else response.read()
@@ -230,7 +248,34 @@ class Source:
         )
         return body.decode("utf-8", "replace")
 
-    def _playable(self, playlist: str, base_url: str) -> bool:
+    def _curl_bytes(self, url: str, referer: str = "", byte_range: str = "") -> bytes:
+        """Fetch with curl: CNO's CDN answers 403 to HTTP/1.1 (Python's only mode)."""
+        if not self._allowed_url(url):
+            raise PressError(f"blocked untrusted upstream URL: {url}")
+        command = [
+            "curl", "-fsS", "-L", "--http2",
+            "--max-time", str(max(1, int(self.timeout))),
+            "-A", USER_AGENT,
+            "-H", "Accept: */*",
+            "-H", "Accept-Encoding: identity",
+        ]
+        if referer:
+            command += ["-e", referer]
+        if byte_range:
+            command += ["-H", f"Range: {byte_range}"]
+        command.append(url)
+        try:
+            result = subprocess.run(
+                command, capture_output=True, timeout=self.timeout + 10
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise PressError(f"curl failed for {url}: {exc}") from exc
+        if result.returncode != 0:
+            detail = result.stderr.decode("utf-8", "replace").strip()[:200]
+            raise PressError(f"curl HTTP error for {url}: {detail}")
+        return result.stdout
+
+    def _playable(self, playlist: str, base_url: str, use_curl: bool = False) -> bool:
         """Check the first segment really is video before committing to a source."""
         segment = next(
             (
@@ -264,10 +309,19 @@ class Source:
             except PressError:
                 return False
             return len(key) >= 16
-        try:
-            _, _, head = self._fetch(urljoin(base_url, segment), "*/*", limit=4096)
-        except PressError:
-            return False
+        target = urljoin(base_url, segment)
+        if use_curl:
+            try:
+                head = self._curl_bytes(
+                    target, self.referer_for(target), "0-65535"
+                )[:4096]
+            except PressError:
+                return False
+        else:
+            try:
+                _, _, head = self._fetch(target, "*/*", limit=4096)
+            except PressError:
+                return False
         return _looks_like_media(head)
 
     def _api_url(self, media_type: str, tmdb_id: int, season, episode, source: str):
@@ -294,6 +348,15 @@ class Source:
         has gone stale or 404s can often be replaced by simply asking again.
         """
         errors = []
+        if self.cno_base:
+            if media_type == "movie":
+                yield f"{self.cno_base}/screen/master/movie/{int(tmdb_id)}", "cno"
+            elif media_type == "tv" and season is not None and episode is not None:
+                yield (
+                    f"{self.cno_base}/screen/master/tv/{int(tmdb_id)}"
+                    f"/{int(season)}/{int(episode)}",
+                    "cno",
+                )
         for source in self.sources:
             for _attempt in range(2):
                 url = self._api_url(media_type, tmdb_id, season, episode, source)
@@ -340,7 +403,7 @@ class Source:
                 if "#EXTINF" not in text:
                     last_error = NoSource(f"{source} playlist has no segments: {url}")
                     continue
-                if not self._playable(text, url):
+                if not self._playable(text, url, use_curl=(source == "cno")):
                     last_error = NoSource(
                         f"{source} playlist serves no video segments: {url}"
                     )
@@ -378,6 +441,10 @@ class Source:
                 capped = [item for item in candidates if item[0] <= self.max_height]
                 if capped:
                     candidates = capped
+                elif source == "cno":
+                    # CNO sometimes only offers 1080p and 1604p; take the
+                    # smaller of those instead of the 15 Mbps top variant
+                    candidates = [min(candidates, key=lambda item: item[0] or 10**6)]
             variant_url = max(candidates, key=lambda item: (item[0], item[1]))[2]
             try:
                 playlist = self._text(variant_url)
@@ -389,7 +456,7 @@ class Source:
                     f"{source} variant has no segments: {variant_url}"
                 )
                 continue
-            if not self._playable(playlist, variant_url):
+            if not self._playable(playlist, variant_url, use_curl=(source == "cno")):
                 last_error = NoSource(
                     f"{source} variant serves no video segments: {variant_url}"
                 )
@@ -763,7 +830,7 @@ class App:
         except (NoSource, PressError) as exc:
             self._remember(key, now, exc, None)
             raise
-        referer = self.source.referer
+        referer = self.source.referer_for(variant)
         self._remember(key, now, variant, referer)
         return variant, referer
 
@@ -772,16 +839,27 @@ class App:
         text = self.source._text(variant)
         if not text.lstrip().startswith("#EXTM3U"):
             raise PressError(f"not an HLS playlist: {variant}")
-        return self.rewrite_manifest(text, variant, referer)
+        transport = (
+            "curl"
+            if self.source.cno_base
+            and _origin(variant) == self.source.cno_base + "/"
+            else ""
+        )
+        return self.rewrite_manifest(text, variant, referer, transport)
 
-    def rewrite_manifest(self, text: str, base_url: str, referer: str) -> str:
+    def rewrite_manifest(self, text: str, base_url: str, referer: str,
+                         transport: str = "") -> str:
         public = self.writer.public_url.rstrip("/")
 
         def proxy_url(value: str, suffix: str = "") -> str:
             absolute = urljoin(base_url, value)
-            token = self.signer.dumps({"u": absolute, "r": referer})
+            payload = {"u": absolute, "r": referer}
+            if transport:
+                payload["x"] = transport
+            token = self.signer.dumps(payload)
             return f"{public}/p/{token}{suffix}"
 
+        fmp4 = "#EXT-X-MAP" in text
         output = []
         for line in text.splitlines():
             if not line:
@@ -808,7 +886,7 @@ class App:
                     )
                 )
             else:
-                output.append(proxy_url(line.strip(), ".ts"))
+                output.append(proxy_url(line.strip(), ".m4s" if fmp4 else ".ts"))
         return "\n".join(output) + "\n"
 
 
@@ -966,20 +1044,36 @@ class Handler(BaseHTTPRequestHandler):
         app = self.server.app
         raw_path = urlsplit(self.path).path
         segment = raw_path.endswith(".ts")
+        fmp4 = raw_path.endswith(".m4s")
         clean = re.sub(r"\.(?:m3u8|ts|m4s|mp4|vtt|key)$", "", token)
         try:
             payload = app.signer.loads(clean)
         except ValueError as exc:
             return self._error(400, str(exc))
         return self._proxy_url(
-            payload["u"], payload.get("r") or "", segment=segment
+            payload["u"], payload.get("r") or "", segment=segment, fmp4=fmp4,
+            transport=payload.get("x") or "",
         )
 
-    def _proxy_url(self, url: str, referer: str, segment: bool = False):
+    def _proxy_url(self, url: str, referer: str, segment: bool = False,
+                   fmp4: bool = False, transport: str = ""):
         app = self.server.app
         if not app.source._allowed_url(url):
             return self._error(403, "upstream host not allowed")
         head_only = self.command == "HEAD"
+        if transport == "curl":
+            try:
+                body = app.source._curl_bytes(
+                    url,
+                    referer or app.source.referer_for(url),
+                    self.headers.get("Range") or "",
+                )
+            except PressError as exc:
+                return self._error(502, str(exc))
+            content_type = "video/mp4" if (fmp4 or not segment) else "video/mp2t"
+            return self._send_bytes(
+                200, body, content_type, head_only=head_only
+            )
         headers = {
             "User-Agent": USER_AGENT,
             "Accept": "*/*",
@@ -1012,7 +1106,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._relay_headers(
                     status,
                     upstream_headers,
-                    content_type="video/mp2t" if segment else content_type,
+                    content_type=(
+                        "video/mp2t" if segment
+                        else "video/mp4" if fmp4
+                        else content_type
+                    ),
                 )
                 return
             first = response.read(64 * 1024)
@@ -1047,7 +1145,11 @@ class Handler(BaseHTTPRequestHandler):
             self._relay_headers(
                 status,
                 upstream_headers,
-                content_type="video/mp2t" if segment else content_type,
+                content_type=(
+                    "video/mp2t" if segment
+                    else "video/mp4" if fmp4
+                    else content_type
+                ),
             )
             if first:
                 self.wfile.write(first)
@@ -1131,6 +1233,10 @@ def parse_args(argv=None):
         default=_env("PRESS_SOURCES", default=DEFAULT_SOURCES),
     )
     parser.add_argument(
+        "--cno-base",
+        default=_env("PRESS_CNO_BASE", default=DEFAULT_CNO_BASE),
+    )
+    parser.add_argument(
         "--max-height",
         type=int,
         default=int(_env("PRESS_MAX_HEIGHT", default=DEFAULT_MAX_HEIGHT)),
@@ -1157,6 +1263,7 @@ def main(argv=None) -> int:
         player_key=args.player_key,
         sources=args.sources,
         max_height=args.max_height,
+        cno_base=args.cno_base,
         timeout=args.timeout,
     )
     writer = LibraryWriter(
@@ -1170,7 +1277,8 @@ def main(argv=None) -> int:
     server = AppServer((args.host, args.port), app)
     print(f"pressplayz library on http://{public_host}:{args.port}")
     print(f"  api:       {source.api_base}")
-    print(f"  sources:   {', '.join(source.sources)}")
+    print(f"  sources:   cno, {', '.join(source.sources)}")
+    print(f"  cno base:  {source.cno_base or 'disabled'}")
     print(f"  max height: {source.max_height or 'unlimited'}")
     print(f"  media:     {writer.root}")
     print(f"  public:    {public_url}")

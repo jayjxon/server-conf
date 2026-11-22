@@ -22,6 +22,8 @@ services:
             PRESS_API_BASE: ${PRESS_API_BASE:-https://vidnest.pro}
             PRESS_SITE_URL: ${PRESS_SITE_URL:-https://pressplayz.top}
             PRESS_SOURCES: ${PRESS_SOURCES:-j5wq,q7mv,vidora}
+            # CNO is tried first; empty disables it and leaves VidNest only
+            PRESS_CNO_BASE: ${PRESS_CNO_BASE:-https://beta.cno.to}
         volumes:
             - ${APP_ROOT}/jellyfin/media:/data
             - ${APP_ROOT}/pressplayz-library:/state
