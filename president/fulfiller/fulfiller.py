@@ -57,7 +57,7 @@ SUBTITLE_MAX_ATTEMPTS = max(
     1, int(os.environ.get("SUBTITLE_MAX_ATTEMPTS", "12"))
 )
 # bump to make existing "done" entries prove their subtitle tracks again
-SUBTITLE_STATE_VERSION = 3
+SUBTITLE_STATE_VERSION = 4
 
 _BAD_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _YEAR_IN_TITLE = re.compile(
@@ -1015,9 +1015,17 @@ class Fulfiller:
             candidates = [
                 candidate
                 for candidate in candidates
-                if "subf2m"
-                in str(candidate.get("Id") or "").lower()
+                if any(
+                    provider in str(candidate.get("Id") or "").lower()
+                    for provider in ("subf2m", "opensubtitles")
+                )
             ]
+            # Prefer Subf2m; OpenSubtitles is the fallback for its gaps.
+            candidates.sort(
+                key=lambda candidate: 0
+                if "subf2m" in str(candidate.get("Id") or "").lower()
+                else 1
+            )
             if not candidates:
                 unavailable += 1
                 continue
@@ -1036,6 +1044,33 @@ class Fulfiller:
                 log(
                     f"external subtitle download for {Path(strm).name!r} "
                     f"returned HTTP {code}"
+                )
+                continue
+            # A 204 only means Jellyfin accepted the request. Verify the
+            # track or sidecar before counting it, so a no-write provider is
+            # retried instead of marking the whole title done.
+            uid = self._jellyfin_user_id()
+            detail = (
+                self._jellyfin_get(f"/Users/{uid}/Items/{item_id}")
+                if uid
+                else None
+            )
+            registered = bool(
+                detail
+                and any(
+                    self._has_subtitle(source)
+                    for source in detail.get("MediaSources") or []
+                )
+            )
+            sidecar = any(
+                Path(strm).with_suffix(suffix).is_file()
+                for suffix in (".en.srt", ".en.vtt")
+            )
+            if not registered and not sidecar:
+                failed += 1
+                log(
+                    f"external subtitle for {Path(strm).name!r} was accepted "
+                    "but did not register"
                 )
                 continue
             downloaded += 1
@@ -1230,14 +1265,14 @@ class Fulfiller:
     def ensure_pending_subtitles(self) -> None:
         """Backfill subtitles even when Seerr no longer lists the request."""
         if self.state.get("subtitles_version") != SUBTITLE_STATE_VERSION:
-            # The old completion test trusted a sidecar filename and could mark
-            # a series done while episodes were still missing subtitles.
+            # OpenSubtitles can now resolve titles Subf2m lacks; revalidate
+            # done entries and retry the ones that had already given up.
             for item in self.state["items"].values():
                 if not self._strm_files(item):
                     continue
                 item.pop("subtitle_attempts", None)
                 item.pop("subtitle_cursor", None)
-                if item.get("subtitles") == "done":
+                if item.get("subtitles") in ("done", "failed"):
                     item["subtitles"] = "pending"
             self.state["subtitles_version"] = SUBTITLE_STATE_VERSION
             self._save_state()
