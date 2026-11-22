@@ -56,8 +56,13 @@ SUBTITLE_BATCH = max(1, int(os.environ.get("SUBTITLE_BATCH", "6")))
 SUBTITLE_MAX_ATTEMPTS = max(
     1, int(os.environ.get("SUBTITLE_MAX_ATTEMPTS", "12"))
 )
+# OpenSubtitles accounts have a download quota; an accepted download that
+# writes no track should pause the title, not consume its retry budget.
+SUBTITLE_RETRY_SECONDS = max(
+    300, int(os.environ.get("SUBTITLE_RETRY_SECONDS", "21600"))
+)
 # bump to make existing "done" entries prove their subtitle tracks again
-SUBTITLE_STATE_VERSION = 4
+SUBTITLE_STATE_VERSION = 5
 
 _BAD_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _YEAR_IN_TITLE = re.compile(
@@ -757,6 +762,7 @@ class Fulfiller:
         old_status = previous.get("subtitles")
         files_changed = previous.get("files") != result.get("files")
         attempts = _int(previous.get("subtitle_attempts"), 0) or 0
+        retry_at = _int(previous.get("subtitle_retry_at"), 0) or 0
         if old_status == "failed" and not files_changed:
             result["subtitles"] = "failed"
             result["subtitle_attempts"] = attempts
@@ -766,6 +772,8 @@ class Fulfiller:
         else:
             result["subtitles"] = "pending"
             result["subtitle_attempts"] = 0 if files_changed else attempts
+            if retry_at and not files_changed:
+                result["subtitle_retry_at"] = retry_at
             if files_changed:
                 result.pop("subtitle_cursor", None)
         return result
@@ -983,6 +991,7 @@ class Fulfiller:
             item["subtitles"] = "done"
             item.pop("subtitle_attempts", None)
             item.pop("subtitle_cursor", None)
+            item.pop("subtitle_retry_at", None)
             return False
 
         downloaded = 0
@@ -1083,8 +1092,21 @@ class Fulfiller:
             item["subtitles"] = "done"
             item.pop("subtitle_attempts", None)
             item.pop("subtitle_cursor", None)
+            item.pop("subtitle_retry_at", None)
             log(f"external subtitles complete for {item.get('title')!r}")
             return downloaded > 0
+        if not downloaded and failed:
+            # OpenSubtitles returns 204 even when its daily download quota is
+            # exhausted, so keep the title pending and do not burn attempts.
+            item["subtitles"] = "pending"
+            item["subtitle_retry_at"] = int(time.time()) + SUBTITLE_RETRY_SECONDS
+            item.pop("subtitle_attempts", None)
+            log(
+                f"external subtitles deferred for {item.get('title')!r}: "
+                f"{failed} download(s) did not register; retrying in "
+                f"{SUBTITLE_RETRY_SECONDS}s"
+            )
+            return False
         attempts = (
             0
             if downloaded
@@ -1272,6 +1294,7 @@ class Fulfiller:
                     continue
                 item.pop("subtitle_attempts", None)
                 item.pop("subtitle_cursor", None)
+                item.pop("subtitle_retry_at", None)
                 if item.get("subtitles") in ("done", "failed"):
                     item["subtitles"] = "pending"
             self.state["subtitles_version"] = SUBTITLE_STATE_VERSION
@@ -1284,6 +1307,10 @@ class Fulfiller:
                 continue
             if item.get("subtitles") is None:
                 item["subtitles"] = "pending"
+            retry_at = _int(item.get("subtitle_retry_at"), 0) or 0
+            if retry_at > time.time():
+                continue
+            item.pop("subtitle_retry_at", None)
             downloaded = self._ensure_external_subtitles(item)
             self._save_state()
             refreshed = refreshed or downloaded

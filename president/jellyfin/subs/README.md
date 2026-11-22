@@ -23,7 +23,9 @@ scripts drive. No account, no API keys bought, nothing paid.
 
 The fulfiller in `../fulfiller` now uses subbuzz's OpenSubtitles.com provider as a fallback
 when Subf2m returns no candidates. The account lives in the host's `subbuzz.xml`, not in this
-repository; these one-off scripts still select Subf2m only.
+repository; these one-off scripts still select Subf2m only. Free OpenSubtitles accounts
+have a daily download quota, so the fulfiller defers a title for
+`FULFILLER_SUBTITLE_RETRY_SECONDS` when a download is accepted but writes no track.
 
 The catch that made a backfill necessary: Subf2m (and every subbuzz provider) searches by
 **IMDb id**, and this library is TMDB-only — all 222,483 items had none, so every search
