@@ -2,10 +2,10 @@
 """Fulfil Seerr requests without Radarr/Sonarr.
 
 The service polls the stock Seerr API for pending and approved requests.  It
-looks the title up in Dispatcharr's VOD database by TMDB id, or in the anime
-catalogue by title/type, then writes the corresponding ``.strm``/``.nfo`` files
-into a small Jellyfin library.  Nothing from the full Dispatcharr VOD tree is
-needed.
+looks the title up in the anime catalogue by title/type first, then falls back
+to Dispatcharr's VOD database by TMDB id, and writes the corresponding
+``.strm``/``.nfo`` files into a small Jellyfin library.  Nothing from the full
+Dispatcharr VOD tree is needed.
 
 Run inside the Dispatcharr image with ``network_mode: service:dispatcharr`` so
 the Django ORM can reach the database on localhost.  Only the standard library
@@ -874,19 +874,19 @@ class Fulfiller:
             details["_seasons"] = sorted(
                 set(previous.get("seasons") or []) | set(requested_seasons)
             )
-        result = self._vprint(media_type, tmdb_id, details)
+        result = self._anime(details)
         if not result:
-            result = self._anime(details)
+            result = self._vprint(media_type, tmdb_id, details)
         if result:
             result = self._with_subtitle_state(result, previous)
         if not result:
             if pending:
                 if self.seerr.decline(request_id):
                     log(
-                        f"declined {media_type} {tmdb_id}: no Dispatcharr/anime match"
+                        f"declined {media_type} {tmdb_id}: no anime/Dispatcharr match"
                     )
             else:
-                log(f"approved {media_type} {tmdb_id}: no Dispatcharr/anime match")
+                log(f"approved {media_type} {tmdb_id}: no anime/Dispatcharr match")
             return
         if previous.get("files"):
             self._prune(previous["files"], result.get("files") or [])
@@ -917,6 +917,19 @@ class Fulfiller:
             if not details:
                 continue
             details["_seasons"] = list(item.get("seasons") or [])
+            result = self._anime(details)
+            if result:
+                # The request was fulfilled from VOD before the anime site was
+                # preferred; replace those files with the anime selection.
+                self.state["items"][key] = result
+                self._save_state()
+                self._prune(item.get("files") or [], [])
+                changed = True
+                log(
+                    f"reconcile: moved {media_type} {tmdb_id} to anime "
+                    f"{result.get('slug')!r} ({self.anime.lang})"
+                )
+                continue
             result = self._vprint(media_type, tmdb_id, details)
             if not result:
                 log(f"reconcile: {media_type} {tmdb_id} is no longer in Dispatcharr")
