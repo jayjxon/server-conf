@@ -595,6 +595,69 @@ def _find_manifest(value, depth: int = 0):
     return None
 
 
+def _video_like(head: bytes, content_type: str = "") -> bool:
+    """True when these leading bytes look like MPEG-TS or fMP4 media."""
+    return (head[:1] == b"G" or b"ftyp" in head[:16]
+            or b"styp" in head[:16] or content_type.startswith("video/"))
+
+
+def _origin(url: str) -> str:
+    parts = urlsplit(url)
+    return (f"{parts.scheme}://{parts.netloc}/"
+            if parts.scheme and parts.netloc else url)
+
+
+def _variant_refs(text: str) -> list:
+    """Variant and I-frame playlist references from a master playlist."""
+    refs, lines = [], text.splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("#EXT-X-I-FRAME-STREAM-INF"):
+            match = re.search(r'URI="([^"]+)"', stripped)
+            if match:
+                refs.append(match.group(1))
+        elif stripped.startswith("#EXT-X-STREAM-INF"):
+            for following in lines[index + 1:]:
+                following = following.strip()
+                if not following or following.startswith("#"):
+                    continue
+                refs.append(following)
+                break
+    return refs
+
+
+def _segment_urls(text: str) -> list:
+    return [line.strip() for line in text.splitlines()
+            if line.strip() and not line.strip().startswith("#")]
+
+
+def _playlist_serves_video(url: str, headers: dict, timeout: float) -> bool:
+    """Fetch a media playlist and confirm its segments are real video."""
+    try:
+        _, _, body = _read_response(url, headers, timeout)
+    except CatalogError:
+        return False
+    text = body.decode("utf-8", "replace")
+    if not text.lstrip().startswith("#EXTM3U"):
+        return False
+    segments = _segment_urls(text)
+    if not segments:
+        return False
+    for segment in segments[:3]:
+        with_range = dict(headers, Range="bytes=0-15")
+        try:
+            request = urllib.request.Request(urljoin(url, segment),
+                                             headers=with_range)
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                head = response.read(16)
+                content_type = (response.headers.get("Content-Type") or "").lower()
+        except (urllib.error.HTTPError, OSError):
+            continue
+        if _video_like(head, content_type):
+            return True
+    return False
+
+
 # Player pages that hide their source: meta tags, a bare <video>, base64, or
 # Dean Edwards packed script.
 _VIDEO_TAG_RE = re.compile(r"""<(?:video|source)\b[^>]+src\s*=\s*["']([^"']+)["']""", re.I)
@@ -928,7 +991,7 @@ class Catalog:
         if not found and self.sources_endpoint:
             found = self._resolve_via_endpoint(link, text)
         if found:
-            return urljoin(link, found)
+            return self._prefer_playable(urljoin(link, found), link)
 
         if _depth < 1:
             iframe = _IFRAME_RE.search(text)
@@ -936,6 +999,40 @@ class Catalog:
                 return self.resolve(urljoin(link, iframe.group(1)), _depth=_depth + 1)
 
         raise NoStream(self._no_manifest_hint(link, status, ctype, body, text))
+
+    def _prefer_playable(self, manifest: str, player_link: str) -> str:
+        """Prefer a media playlist that actually serves video.
+
+        Some hosts hand out a master whose variant server answers with an
+        image playlist.  The same variant usually exists on the master's own
+        host, so retry there before falling back to the original manifest.
+        """
+        if not urlsplit(manifest).path.lower().endswith(".m3u8"):
+            return manifest
+        origin = _origin(player_link)
+        headers = self._headers(origin, "*/*")
+        headers["Origin"] = origin.rstrip("/")
+        try:
+            _, _, body = _read_response(manifest, headers, self.timeout)
+        except CatalogError:
+            return manifest
+        text = body.decode("utf-8", "replace")
+        if (not text.lstrip().startswith("#EXTM3U")
+                or "#EXT-X-STREAM-INF" not in text):
+            return manifest
+        variants = [urljoin(manifest, ref) for ref in _variant_refs(text)]
+        for variant in variants:
+            if _playlist_serves_video(variant, headers, self.timeout):
+                return variant
+        for variant in variants:
+            # The decoy lives on another host but keeps the same file name.
+            name = urlsplit(variant).path.rsplit("/", 1)[-1]
+            alternative = urljoin(manifest, name)
+            if alternative == variant:
+                continue
+            if _playlist_serves_video(alternative, headers, self.timeout):
+                return alternative
+        return manifest
 
     def _resolve_via_endpoint(self, link: str, text: str):
         """Fill `sources_endpoint` from the page's data-* ids and read the JSON."""
@@ -955,13 +1052,8 @@ class Catalog:
             return None
         if not urlsplit(url).scheme:
             url = urljoin(link, url)
-        # MegaPlay rewrites getSources requests to carry the page's `s=` param.
-        try:
-            s_val = parse_qs(urlsplit(link).query).get("s", [None])[0]
-        except ValueError:
-            s_val = None
-        if s_val and "s=" not in url and "getSources" in url:
-            url += ("&" if "?" in url else "?") + "s=" + urlquote(s_val)
+        # Do not forward the page's `s=` hint: MegaPlay answers `s=tcdn` with
+        # a decoy manifest whose variants only serve ad images.
         headers = self._headers(link, "application/json")
         headers["X-Requested-With"] = "XMLHttpRequest"
         try:

@@ -57,6 +57,10 @@ URI_ATTR_RE = re.compile(r"""URI=(?:"([^"]+)"|'([^']+)')""")
 FILENAME_BAD_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
+def _short_url(url: str, limit: int = 160) -> str:
+    return url if len(url) <= limit else url[:limit] + "..."
+
+
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
@@ -633,20 +637,32 @@ class App:
                 raise NoStream(f"{show.slug} has no episodes")
             episode = episodes[0]
         server = episode.server(lang=lang)
-        manifest = self.catalog.resolve(server.url)
+        try:
+            manifest = self.catalog.resolve(server.url)
+        except CatalogError as exc:
+            self.log(f"resolve failed {slug} {number} {lang} "
+                     f"server={server.name}: {exc}")
+            raise
+        self.log(f"resolve ok {slug} {number} {lang} server={server.name} "
+                 f"-> {_short_url(manifest)}")
         referer = self._referer_for(server.url, manifest)
         with self._resolve_lock:
             self._resolve_cache[key] = (now, manifest, referer)
         return manifest, referer
 
     def rewrite_manifest(self, text: str, base_url: str, referer: str) -> str:
-        """Point every variant, segment, map and key back through /p/."""
-        public = self.public_url.rstrip("/")
+        """Point every variant, segment, map and key back through /p/.
 
-        def proxy_url(value: str) -> str:
+        ffmpeg rejects segment URLs without a recognised media extension, so
+        proxied URLs carry a suffix matching what they actually serve.
+        """
+        public = self.public_url.rstrip("/")
+        master = "#EXT-X-STREAM-INF" in text
+
+        def proxy_url(value: str, suffix: str = "") -> str:
             absolute = urljoin(base_url, value)
             token = self.signer.dumps({"u": absolute, "r": referer})
-            return f"{public}/p/{token}"
+            return f"{public}/p/{token}{suffix}"
 
         output = []
         for line in text.splitlines():
@@ -654,12 +670,22 @@ class App:
                 output.append(line)
                 continue
             if line.startswith("#"):
+                if line.startswith("#EXT-X-KEY"):
+                    suffix = ""
+                elif line.startswith("#EXT-X-MAP"):
+                    suffix = ".mp4"
+                elif line.startswith("#EXT-X-MEDIA"):
+                    suffix = (".vtt" if 'TYPE="SUBTITLES"' in line
+                              else ".m3u8")
+                else:
+                    suffix = ".m3u8"
                 output.append(URI_ATTR_RE.sub(
                     lambda match: 'URI="' + proxy_url(
-                        match.group(1) or match.group(2)) + '"',
+                        match.group(1) or match.group(2), suffix) + '"',
                     line))
             else:
-                output.append(proxy_url(line.strip()))
+                output.append(proxy_url(line.strip(),
+                                        ".m3u8" if master else ".ts"))
         return "\n".join(output) + "\n"
 
 
@@ -674,6 +700,15 @@ class AppServer(ThreadingHTTPServer):
     def __init__(self, address, app: App):
         self.app = app
         super().__init__(address, Handler)
+
+    def handle_error(self, request, client_address):
+        # Clients that abort playback are routine; only unexpected failures
+        # deserve a traceback.
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
+            return
+        self.app.log(f"request from {client_address[0]} failed: "
+                     f"{type(exc).__name__}: {exc}")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -694,9 +729,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", cache)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        if not head_only:
-            self.wfile.write(body)
+        try:
+            self.end_headers()
+            if not head_only:
+                self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def _json(self, status: int, payload: dict) -> None:
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -793,6 +831,7 @@ class Handler(BaseHTTPRequestHandler):
         except NotFound as exc:
             self._error(404, str(exc))
         except NoStream as exc:
+            app.log(f"no stream for {_short_url(self.path)}: {exc}")
             self._error(502, str(exc))
         except ValueError as exc:
             self._error(400, str(exc))
@@ -826,6 +865,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _proxy(self, token: str):
         app = self.server.app
+        token = re.sub(r"\.(?:m3u8|ts|m4s|mp4|vtt|key)$", "", token)
         try:
             payload = app.signer.loads(token)
         except ValueError as exc:
@@ -858,6 +898,9 @@ class Handler(BaseHTTPRequestHandler):
                                timeout=app.timeout)
         except HTTPError as exc:
             body = exc.read(4000) or b""
+            preview = " ".join(body.decode("utf-8", "replace").split())[:160]
+            app.log(f"proxy upstream HTTP {exc.code} for {_short_url(url)}"
+                    + (f": {preview!r}" if preview else ""))
             content_type = (exc.headers.get("Content-Type")
                             or "text/plain; charset=utf-8")
             return self._send_bytes(exc.code, body, content_type,
