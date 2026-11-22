@@ -1,0 +1,38 @@
+services:
+    anime-library:
+        build:
+            context: ../../analysis
+            dockerfile: Dockerfile
+        container_name: anime-library
+        restart: unless-stopped
+        security_opt:
+            - no-new-privileges:true
+        pids_limit: 200
+        user: ${PUID}:${PGID}
+        environment:
+            TZ: ${TZ:-Etc/UTC}
+            ANIME_CATALOG_BASE: ${ANIME_CATALOG_BASE:?set the anime catalogue API origin}
+            # same path and tree jellyfin mounts at /data, so the library paths the
+            # UI prints are exactly the ones to add in jellyfin
+            ANIME_MEDIA_DIR: /data
+            ANIME_PUBLIC_URL: https://anime.${DOMAINNAME}
+            ANIME_DATA_DIR: /state
+        volumes:
+            - ${APP_ROOT}/jellyfin/media:/data
+            - ${APP_ROOT}/anime-library:/state
+        expose:
+            - 8787
+        networks:
+            - traefik
+        labels:
+            traefik.enable: true
+            traefik.http.routers.anime-library-rtr.rule: Host(`anime.${DOMAINNAME}`)
+            # the UI and API need authelia; /play and /p are explicitly bypassed
+            # in authelia's configuration because jellyfin/players fetch them directly
+            traefik.http.routers.anime-library-rtr.middlewares: middlewares-authelia@file
+            traefik.http.services.anime-library-svc.loadbalancer.server.port: 8787
+
+            homepage.group: media
+            homepage.name: Anime Library
+            homepage.icon: mdi-television-classic
+            homepage.href: https://anime.${DOMAINNAME}

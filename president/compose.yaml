@@ -11,6 +11,7 @@ include:
 
     # services
     - ./jellyfin/compose.yaml
+    - ./anime-library/compose.yaml
     - ./dispatcharr/compose.yaml
     - ./bazarr/compose.yaml
     - ./pingvin/compose.yaml
