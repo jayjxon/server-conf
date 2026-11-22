@@ -766,6 +766,8 @@ class Fulfiller:
         else:
             result["subtitles"] = "pending"
             result["subtitle_attempts"] = 0 if files_changed else attempts
+            if files_changed:
+                result.pop("subtitle_cursor", None)
         return result
 
     @staticmethod
@@ -980,12 +982,19 @@ class Fulfiller:
         if not missing and not waiting:
             item["subtitles"] = "done"
             item.pop("subtitle_attempts", None)
+            item.pop("subtitle_cursor", None)
             return False
 
         downloaded = 0
         unavailable = 0
         failed = 0
-        batch = missing[:SUBTITLE_BATCH]
+        batch = []
+        if missing:
+            # Rotate through the missing list: a season with no candidates must
+            # not starve the episodes after it.
+            cursor = (_int(item.get("subtitle_cursor"), 0) or 0) % len(missing)
+            batch = (missing[cursor:] + missing[:cursor])[:SUBTITLE_BATCH]
+            item["subtitle_cursor"] = (cursor + len(batch)) % len(missing)
         for strm, media in batch:
             item_id = media.get("Id")
             if not item_id:
@@ -1038,6 +1047,7 @@ class Fulfiller:
         if remaining <= 0:
             item["subtitles"] = "done"
             item.pop("subtitle_attempts", None)
+            item.pop("subtitle_cursor", None)
             log(f"external subtitles complete for {item.get('title')!r}")
             return downloaded > 0
         attempts = (
