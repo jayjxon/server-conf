@@ -615,6 +615,16 @@ class Fulfiller:
         previous = self.state["items"].get(key) or {}
         if not pending and previous.get("kind") == "anime" and previous.get("slug"):
             return
+        if (
+            not pending
+            and previous.get("files")
+            and all(Path(item).is_file() for item in previous["files"])
+            and (
+                media_type == "movie"
+                or set(requested_seasons).issubset(set(previous.get("seasons") or []))
+            )
+        ):
+            return
         if media_type == "tv":
             details["_seasons"] = sorted(
                 set(previous.get("seasons") or []) | set(requested_seasons)
