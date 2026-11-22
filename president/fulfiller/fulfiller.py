@@ -37,6 +37,7 @@ ANIME_LIBRARY_URL = os.environ.get(
     "ANIME_LIBRARY_URL", "http://anime-library:8787"
 ).rstrip("/")
 ANIME_LANG = os.environ.get("ANIME_LANG", "dub").strip().lower()
+CINECAT_LIBRARY_URL = os.environ.get("CINECAT_LIBRARY_URL", "").rstrip("/")
 LIBRARY_DIR = Path(os.environ.get("LIBRARY_DIR", "/library"))
 STATE_DIR = Path(os.environ.get("STATE_DIR", "/state"))
 STATE_FILE = STATE_DIR / "state.json"
@@ -199,6 +200,18 @@ class Seerr:
             or data.get("name")
             or ""
         )
+        season_counts = {}
+        for season in data.get("seasons") or []:
+            if not isinstance(season, dict):
+                continue
+            number = _int(
+                season.get("seasonNumber") or season.get("season_number")
+            )
+            count = _int(
+                season.get("episodeCount") or season.get("episode_count")
+            )
+            if number is not None and count:
+                season_counts[number] = count
         return {
             "media_type": media_type,
             "title": str(title).strip(),
@@ -206,6 +219,7 @@ class Seerr:
             "year": year,
             "tmdb_id": int(tmdb_id),
             "seasons": _int(data.get("numberOfSeasons") or data.get("number_of_seasons")),
+            "season_counts": season_counts,
             "episodes": _int(
                 data.get("numberOfEpisodes") or data.get("number_of_episodes")
             ),
@@ -345,11 +359,49 @@ class Anime:
         return True
 
 
+class Cinecat:
+    """Client for the local CineCat 1080p selector/proxy."""
+
+    def __init__(self, base: str):
+        self.base = base.rstrip("/")
+
+    def select(self, details: dict):
+        if not self.base:
+            return None
+        payload = {
+            "tmdb_id": details.get("tmdb_id"),
+            "media_type": details.get("media_type"),
+            "title": details.get("title"),
+            "year": details.get("year"),
+            "seasons": details.get("_seasons") or [],
+            "season_counts": details.get("season_counts") or {},
+        }
+        try:
+            code, data = http_json(
+                "POST",
+                self.base + "/api/select",
+                payload=payload,
+                timeout=300,
+            )
+        except (urllib.error.URLError, OSError) as exc:
+            log(f"cinecat select failed: {exc}")
+            return None
+        if code == 404:
+            return None
+        if code != 200 or not isinstance(data, dict):
+            detail = data.get("error") if isinstance(data, dict) else ""
+            log(f"cinecat select returned HTTP {code}: {detail}")
+            return None
+        selection = data.get("selection")
+        return selection if isinstance(selection, dict) else None
+
+
 class Fulfiller:
     def __init__(self):
         self.seerr = Seerr(SEERR_URL, SEERR_API_KEY)
         self.vod = VodCatalog()
         self.anime = Anime(ANIME_LIBRARY_URL, ANIME_LANG)
+        self.cinecat = Cinecat(CINECAT_LIBRARY_URL)
         self.state = self._load_state()
         self._jellyfin_uid = None
 
@@ -603,6 +655,29 @@ class Fulfiller:
             "files": [],
         }
 
+    def _cinecat(self, details: dict):
+        selection = self.cinecat.select(details)
+        if not selection:
+            return None
+        files = []
+        for name in selection.get("files") or []:
+            text = str(name)
+            # cinecat-library writes /data/requests; the fulfiller mounts that
+            # same tree at /library. Keep state paths in the fulfiller namespace.
+            marker = "/data/requests/"
+            if text.startswith(marker):
+                text = str(LIBRARY_DIR / text[len(marker):])
+            files.append(text)
+        return {
+            "kind": "cinecat",
+            "media_type": details["media_type"],
+            "tmdb_id": details.get("tmdb_id"),
+            "title": details.get("title") or selection.get("title"),
+            "year": details.get("year") or selection.get("year"),
+            "seasons": selection.get("seasons") or [],
+            "files": files,
+        }
+
     def _has_unmaterialized_season(
         self, tmdb_id: int, requested: list[int], materialized: set[int]
     ) -> bool:
@@ -663,7 +738,11 @@ class Fulfiller:
 
     def _with_subtitle_state(self, result, previous: dict):
         """Carry the subtitle work state without making every poll look changed."""
-        if not result or result.get("kind") != "vod":
+        if not result:
+            return result
+        if previous.get("seerr_status"):
+            result["seerr_status"] = previous["seerr_status"]
+        if result.get("kind") != "vod":
             return result
         old_status = previous.get("subtitles")
         files_changed = previous.get("files") != result.get("files")
@@ -924,8 +1003,11 @@ class Fulfiller:
             and (
                 media_type == "movie"
                 or set(requested_seasons).issubset(materialized)
-                or not self._has_unmaterialized_season(
-                    tmdb_id, requested_seasons, materialized
+                or (
+                    previous.get("kind") != "cinecat"
+                    and not self._has_unmaterialized_season(
+                        tmdb_id, requested_seasons, materialized
+                    )
                 )
             )
         ):
@@ -943,6 +1025,8 @@ class Fulfiller:
                 set(previous.get("seasons") or []) | set(requested_seasons)
             )
         result = self._anime(details)
+        if not result:
+            result = self._cinecat(details)
         if not result:
             result = self._vprint(media_type, tmdb_id, details)
         if result:
@@ -988,16 +1072,21 @@ class Fulfiller:
                 continue
             details["_seasons"] = list(item.get("seasons") or [])
             result = self._anime(details)
+            if not result:
+                result = self._cinecat(details)
             if result:
-                # The request was fulfilled from VOD before the anime site was
-                # preferred; replace those files with the anime selection.
+                # The request was fulfilled from VOD before a preferred source
+                # was available; replace those files with the new selection.
                 self.state["items"][key] = result
                 self._save_state()
-                self._prune(item.get("files") or [], [])
+                self._prune(
+                    item.get("files") or [], result.get("files") or []
+                )
                 changed = True
+                detail = result.get("slug") or result.get("kind")
                 log(
-                    f"reconcile: moved {media_type} {tmdb_id} to anime "
-                    f"{result.get('slug')!r} ({self.anime.lang})"
+                    f"reconcile: moved {media_type} {tmdb_id} to "
+                    f"{result.get('kind')} {detail!r}"
                 )
                 continue
             result = self._vprint(media_type, tmdb_id, details)

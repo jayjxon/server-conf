@@ -1,0 +1,33 @@
+services:
+    cinecat-library:
+        build:
+            context: ../../cinecat
+            dockerfile: Dockerfile
+        container_name: cinecat-library
+        restart: unless-stopped
+        security_opt:
+            - no-new-privileges:true
+        pids_limit: 200
+        user: ${PUID}:${PGID}
+        environment:
+            TZ: ${TZ:-Etc/UTC}
+            # same path/tree jellyfin mounts at /data; the writer puts entries
+            # under requests/ so the existing request library picks them up
+            CINECAT_MEDIA_DIR: /data
+            CINECAT_PUBLIC_URL: https://cinecat.${DOMAINNAME}
+            CINECAT_DATA_DIR: /state
+            CINECAT_SITE_URL: ${CINECAT_SITE_URL:-https://beta.cinecat.eu}
+        volumes:
+            - ${APP_ROOT}/jellyfin/media:/data
+            - ${APP_ROOT}/cinecat-library:/state
+        expose:
+            - 8788
+        networks:
+            - traefik
+        labels:
+            traefik.enable: true
+            traefik.http.routers.cinecat-library-rtr.rule: Host(`cinecat.${DOMAINNAME}`)
+            # the JSON API is admin-only; /play and /p are bypassed in authelia
+            # because jellyfin and players fetch the .strm URLs directly
+            traefik.http.routers.cinecat-library-rtr.middlewares: middlewares-authelia@file
+            traefik.http.services.cinecat-library-svc.loadbalancer.server.port: 8788

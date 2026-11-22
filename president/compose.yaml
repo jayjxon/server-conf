@@ -12,6 +12,7 @@ include:
     # services
     - ./jellyfin/compose.yaml
     - ./anime-library/compose.yaml
+    - ./cinecat-library/compose.yaml
     - ./dispatcharr/compose.yaml
     - ./seerr/compose.yaml
     - ./fulfiller/compose.yaml

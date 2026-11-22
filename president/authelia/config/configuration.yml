@@ -95,6 +95,19 @@ access_control:
           subject:
               - 'group:admins'
 
+        # cinecat-library: the selector API is admin-only, but the .strm URLs
+        # are fetched by jellyfin and players, so the proxy paths are exempt.
+        # keep this before the domain rule.
+        - domain: 'cinecat.${DOMAINNAME}'
+          resources:
+              - '^/(play|p)/.*'
+          policy: 'bypass'
+
+        - domain: 'cinecat.${DOMAINNAME}'
+          policy: 'one_factor'
+          subject:
+              - 'group:admins'
+
         # bazarr runs no login of its own (its native oidc needs a release newer than the
         # stable image), so this rule is the only gate, and it is admins only as well
         - domain: 'bazarr.${DOMAINNAME}'

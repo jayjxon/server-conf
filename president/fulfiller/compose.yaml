@@ -10,6 +10,7 @@ services:
             - dispatcharr
             - seerr
             - anime-library
+            - cinecat-library
         security_opt:
             - no-new-privileges:true
         pids_limit: 100
@@ -28,6 +29,7 @@ services:
             DISPATCHARR_PUBLIC_URL: https://dispatcharr.${DOMAINNAME}
             ANIME_LIBRARY_URL: http://anime-library:8787
             ANIME_LANG: ${ANIME_LANG:-dub}
+            CINECAT_LIBRARY_URL: http://cinecat-library:8788
             LIBRARY_DIR: /library
             STATE_DIR: /state
             POLL_SECONDS: ${FULFILLER_POLL_SECONDS:-30}
