@@ -63,6 +63,17 @@ access_control:
               - '^/proxy/vod/.*'
           policy: 'bypass'
 
+        # the Xtream Codes output is fetched by external players (TiviMate etc.). a player
+        # cannot complete an authelia redirect and authenticates with the XC password
+        # instead, so these paths skip the portal. everything else on the host stays
+        # admins-only; keep this rule ahead of the one below.
+        - domain: 'dispatcharr.${DOMAINNAME}'
+          resources:
+              - '^/(get|player_api|panel_api|xmltv)\.php'
+              - '^/(live|movie|series|timeshift)/'
+              - '^/streaming/timeshift\.php'
+          policy: 'bypass'
+
         # dispatcharr is for the admin account only. anyone else who passes the first
         # factor is refused with 403 here, before the request reaches the app
         - domain: 'dispatcharr.${DOMAINNAME}'
