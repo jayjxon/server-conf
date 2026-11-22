@@ -54,7 +54,7 @@ class Gateway:
             if base and base.rstrip("/")
         ]
         self.cache_ttl = float(os.environ.get("GATEWAY_CACHE_TTL", "60"))
-        self.cache_miss_ttl = float(os.environ.get("GATEWAY_CACHE_MISS_TTL", "60"))
+        self.cache_miss_ttl = float(os.environ.get("GATEWAY_CACHE_MISS_TTL", "15"))
         self.cache_max = int(os.environ.get("GATEWAY_CACHE_MAX", "512"))
         self._cache = {}
         self._cache_lock = threading.Lock()

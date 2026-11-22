@@ -55,6 +55,9 @@ DEFAULT_PLAYER_KEY = "3a67e8866ae1d2bb9e81fe7f73315a56eb3bdf5e3e755c7554c8be6910
 # Nova (the default) only has movies. Comet covers most of Severance S1, Raven
 # covers everything except S01E09, and Comet has that episode.
 DEFAULT_SOURCES = "j5wq,q7mv,vidora"
+# the 1080p variants of some upstreams cannot sustain realtime (measured ~0.5x
+# on the Blues Brothers source), so cap master selection at 720p by default
+DEFAULT_MAX_HEIGHT = 720
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
@@ -153,12 +156,14 @@ class Source:
         site_url: str = DEFAULT_SITE_URL,
         player_key: str = DEFAULT_PLAYER_KEY,
         sources: str = DEFAULT_SOURCES,
+        max_height: int = DEFAULT_MAX_HEIGHT,
         timeout: float = 20.0,
     ):
         self.api_base = api_base.rstrip("/")
         self.site_url = site_url.rstrip("/")
         self.player_key = player_key
         self.sources = [part.strip() for part in sources.split(",") if part.strip()]
+        self.max_height = _int(max_height, DEFAULT_MAX_HEIGHT) or 0
         self.timeout = float(timeout)
         # the player only accepts requests carrying its own page as the referer
         self.referer = self.api_base + "/"
@@ -283,28 +288,39 @@ class Source:
         return url
 
     def _candidates(self, media_type, tmdb_id, season, episode):
+        """Yield (url, source) for each upstream, retrying a rejected one once.
+
+        VidNest hands out a freshly signed URL per API call, so a playlist that
+        has gone stale or 404s can often be replaced by simply asking again.
+        """
         errors = []
         for source in self.sources:
-            url = self._api_url(media_type, tmdb_id, season, episode, source)
-            try:
-                data = self._json(url)
-            except NoSource as exc:
-                errors.append(f"{source}: {exc}")
-                continue
-            except PressError as exc:
-                errors.append(f"{source}: {exc}")
-                continue
-            if not isinstance(data, dict) or not data.get("result"):
-                detail = data.get("message") if isinstance(data, dict) else ""
-                errors.append(f"{source}: {detail or 'no result'}")
-                continue
-            for entry in data.get("sources") or []:
-                if not isinstance(entry, dict):
+            for _attempt in range(2):
+                url = self._api_url(media_type, tmdb_id, season, episode, source)
+                try:
+                    data = self._json(url)
+                except NoSource as exc:
+                    errors.append(f"{source}: {exc}")
                     continue
-                value = str(entry.get("url") or "").strip()
-                if value.startswith("https://"):
-                    yield value, str(entry.get("source") or source)
-                    break
+                except PressError as exc:
+                    errors.append(f"{source}: {exc}")
+                    continue
+                if not isinstance(data, dict) or not data.get("result"):
+                    detail = data.get("message") if isinstance(data, dict) else ""
+                    errors.append(f"{source}: {detail or 'no result'}")
+                    continue
+                value = ""
+                for entry in data.get("sources") or []:
+                    if not isinstance(entry, dict):
+                        continue
+                    candidate = str(entry.get("url") or "").strip()
+                    if candidate.startswith("https://"):
+                        value = candidate
+                        break
+                if not value:
+                    errors.append(f"{source}: no usable URL")
+                    continue
+                yield value, source
         self._last_errors = errors
 
     def choose_stream(self, media_type: str, tmdb_id: int, season=None, episode=None) -> str:
@@ -358,6 +374,10 @@ class Source:
             if not candidates:
                 last_error = NoSource(f"{source} master has no variants: {url}")
                 continue
+            if self.max_height:
+                capped = [item for item in candidates if item[0] <= self.max_height]
+                if capped:
+                    candidates = capped
             variant_url = max(candidates, key=lambda item: (item[0], item[1]))[2]
             try:
                 playlist = self._text(variant_url)
@@ -673,7 +693,7 @@ class App:
         # title the source does not carry is not re-queried on every playback
         self._resolve_ttl = float(os.environ.get("PRESS_RESOLVE_TTL", "600"))
         self._resolve_miss_ttl = float(
-            os.environ.get("PRESS_RESOLVE_MISS_TTL", "300")
+            os.environ.get("PRESS_RESOLVE_MISS_TTL", "30")
         )
         self.timeout = source.timeout
         rewritten = self.writer.rewrite_stream_urls(
@@ -1110,6 +1130,11 @@ def parse_args(argv=None):
         "--sources",
         default=_env("PRESS_SOURCES", default=DEFAULT_SOURCES),
     )
+    parser.add_argument(
+        "--max-height",
+        type=int,
+        default=int(_env("PRESS_MAX_HEIGHT", default=DEFAULT_MAX_HEIGHT)),
+    )
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--timeout", type=float, default=20.0)
@@ -1131,6 +1156,7 @@ def main(argv=None) -> int:
         site_url=args.site_url,
         player_key=args.player_key,
         sources=args.sources,
+        max_height=args.max_height,
         timeout=args.timeout,
     )
     writer = LibraryWriter(
@@ -1145,6 +1171,7 @@ def main(argv=None) -> int:
     print(f"pressplayz library on http://{public_host}:{args.port}")
     print(f"  api:       {source.api_base}")
     print(f"  sources:   {', '.join(source.sources)}")
+    print(f"  max height: {source.max_height or 'unlimited'}")
     print(f"  media:     {writer.root}")
     print(f"  public:    {public_url}")
     if "127.0.0.1" in public_url or "localhost" in public_url:
