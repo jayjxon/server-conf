@@ -1138,18 +1138,6 @@ class Fulfiller:
             return
         key = f"{media_type}:{tmdb_id}"
         previous = self.state["items"].get(key) or {}
-        if (
-            not pending
-            and self._strm_files(previous)
-            and previous.get("subtitles") in (None, "pending")
-        ):
-            # Also covers items added before subtitle work was tracked.
-            if previous.get("subtitles") is None:
-                previous["subtitles"] = "pending"
-            refreshed = self._ensure_external_subtitles(previous)
-            self._save_state()
-            if refreshed:
-                self._refresh_jellyfin()
         if not pending and previous.get("kind") == "anime" and previous.get("slug"):
             if self._mark_seerr_available(request, previous, requested_seasons):
                 self._save_state()
@@ -1227,6 +1215,20 @@ class Fulfiller:
             f"{result.get('title')!r} ({result.get('kind')})"
         )
 
+    def ensure_pending_subtitles(self) -> None:
+        """Backfill subtitles even when Seerr no longer lists the request."""
+        for item in list(self.state["items"].values()):
+            if not self._strm_files(item):
+                continue
+            if item.get("subtitles") not in (None, "pending"):
+                continue
+            if item.get("subtitles") is None:
+                item["subtitles"] = "pending"
+            downloaded = self._ensure_external_subtitles(item)
+            self._save_state()
+            if downloaded:
+                self._refresh_jellyfin()
+
     def reconcile(self) -> None:
         changed = False
         for key, item in list(self.state["items"].items()):
@@ -1302,6 +1304,7 @@ def main() -> int:
                 fulfiller.handle(request, pending=True)
             for request in fulfiller.seerr.requests("approved"):
                 fulfiller.handle(request, pending=False)
+            fulfiller.ensure_pending_subtitles()
         except Exception as exc:  # keep the loop alive
             log(f"unhandled error: {type(exc).__name__}: {exc}")
         time.sleep(POLL_SECONDS)
