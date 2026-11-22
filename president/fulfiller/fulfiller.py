@@ -580,6 +580,16 @@ class Fulfiller:
             "files": [],
         }
 
+    def _has_unmaterialized_season(
+        self, tmdb_id: int, requested: list[int], materialized: set[int]
+    ) -> bool:
+        """True when Dispatcharr has a requested season we have not written yet."""
+        hit = self.vod.series(tmdb_id, requested)
+        if not hit:
+            return False
+        available = {_int(episode.season_number, 1) for episode, _ in hit[1]}
+        return bool(available - materialized)
+
     def _refresh_jellyfin(self) -> None:
         global _refresh_warning
         if not JELLYFIN_API_KEY:
@@ -615,13 +625,17 @@ class Fulfiller:
         previous = self.state["items"].get(key) or {}
         if not pending and previous.get("kind") == "anime" and previous.get("slug"):
             return
+        materialized = set(previous.get("seasons") or [])
         if (
             not pending
             and previous.get("files")
             and all(Path(item).is_file() for item in previous["files"])
             and (
                 media_type == "movie"
-                or set(requested_seasons).issubset(set(previous.get("seasons") or []))
+                or set(requested_seasons).issubset(materialized)
+                or not self._has_unmaterialized_season(
+                    tmdb_id, requested_seasons, materialized
+                )
             )
         ):
             return
@@ -643,9 +657,13 @@ class Fulfiller:
             return
         if previous.get("files"):
             self._prune(previous["files"], result.get("files") or [])
+        previous_files = previous.get("files") or []
         self.state["items"][key] = result
         self._save_state()
-        self._refresh_jellyfin()
+        if result != previous or not all(
+            Path(item).is_file() for item in previous_files
+        ):
+            self._refresh_jellyfin()
         if pending and not self.seerr.approve(request_id):
             return
         log(
