@@ -313,7 +313,7 @@ class Source:
         if use_curl:
             try:
                 head = self._curl_bytes(
-                    target, self.referer_for(target), "0-65535"
+                    target, self.referer_for(base_url), "0-65535"
                 )[:4096]
             except PressError:
                 return False
