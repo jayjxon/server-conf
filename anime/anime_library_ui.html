@@ -511,6 +511,7 @@ main { width: min(1500px, 100%); margin: 0 auto; padding: 34px clamp(18px, 4vw, 
   background: rgba(4,6,13,0.36);
 }
 .path-head { margin-bottom: 7px; color: var(--muted); font-size: 0.67rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; }
+.path-note { margin: 0 0 9px; color: var(--muted-2); font-size: 0.66rem; line-height: 1.5; }
 .path-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .path-row + .path-row { margin-top: 5px; }
 .path-label { flex: 0 0 47px; color: var(--muted-2); font-size: 0.64rem; }
@@ -595,9 +596,48 @@ main { width: min(1500px, 100%); margin: 0 auto; padding: 34px clamp(18px, 4vw, 
   font-size: 0.7rem;
 }
 .episode-num { flex: 0 0 auto; color: #c4b5fd; font-weight: 700; font-variant-numeric: tabular-nums; }
-.episode-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.episode-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.episode-preview {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  color: var(--accent-2);
+  background: transparent;
+  cursor: pointer;
+}
+.episode-preview:hover { color: white; background: rgba(34, 211, 238, 0.16); }
+.episode-preview svg { width: 13px; height: 13px; }
 .modal-note { margin: 10px 0 0; color: var(--muted-2); font-size: 0.68rem; }
 .modal-loading { display: grid; place-items: center; min-height: 360px; color: var(--muted); font-size: 0.82rem; }
+
+/* ---------- preview ---------- */
+.preview-modal { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 24px; }
+.preview-backdrop { position: absolute; inset: 0; background: rgba(2, 4, 10, 0.84); backdrop-filter: blur(14px); }
+.preview-card {
+  position: relative;
+  width: min(1000px, 100%);
+  max-height: 92vh;
+  overflow: auto;
+  padding: 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: 22px;
+  background: var(--panel-solid);
+  box-shadow: 0 35px 100px rgba(0,0,0,0.65);
+  animation: modal-in 220ms cubic-bezier(.2,.7,.2,1);
+}
+.preview-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+.preview-head h3 { margin: 0; font-size: 1.02rem; letter-spacing: -0.02em; }
+.preview-head p { margin: 4px 0 0; color: var(--muted); font-size: 0.74rem; }
+.preview-stage { position: relative; aspect-ratio: 16 / 9; display: grid; place-items: center; overflow: hidden; border-radius: 14px; background: #000; }
+.preview-stage video { width: 100%; height: 100%; display: block; background: #000; }
+.preview-status { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; color: var(--muted); background: rgba(0, 0, 0, 0.58); font-size: 0.82rem; text-align: center; pointer-events: none; }
+.preview-status.error { color: var(--danger); }
+.preview-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 12px; color: var(--muted-2); font-size: 0.68rem; }
+.preview-foot code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60vw; }
 
 /* ---------- toasts ---------- */
 .toasts {
@@ -670,6 +710,9 @@ main { width: min(1500px, 100%); margin: 0 auto; padding: 34px clamp(18px, 4vw, 
   .modal-grid { grid-template-columns: 1fr; }
   .modal-poster { max-width: 190px; }
   .episode-list { grid-template-columns: 1fr; }
+  .preview-modal { padding: 10px; }
+  .preview-card { padding: 12px; border-radius: 18px; }
+  .preview-foot code { max-width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; scroll-behavior: auto !important; }
@@ -768,6 +811,29 @@ main { width: min(1500px, 100%); margin: 0 auto; padding: 34px clamp(18px, 4vw, 
   </div>
 </div>
 
+<div id="preview" class="preview-modal" hidden>
+  <div class="preview-backdrop" data-close-preview></div>
+  <div class="preview-card" role="dialog" aria-modal="true" aria-labelledby="previewTitle">
+    <div class="preview-head">
+      <div>
+        <h3 id="previewTitle">Preview</h3>
+        <p id="previewMeta"></p>
+      </div>
+      <button id="previewClose" class="icon-btn" type="button" title="Close preview" aria-label="Close preview">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+    </div>
+    <div class="preview-stage">
+      <video id="previewVideo" controls playsinline preload="metadata"></video>
+      <div id="previewStatus" class="preview-status" hidden></div>
+    </div>
+    <div class="preview-foot">
+      <a id="previewOpen" class="btn ghost small" href="#" target="_blank" rel="noopener">Open HLS URL</a>
+      <code id="previewUrlLabel"></code>
+    </div>
+  </div>
+</div>
+
 <div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
 
 <script>
@@ -780,7 +846,8 @@ main { width: min(1500px, 100%); margin: 0 auto; padding: 34px clamp(18px, 4vw, 
     check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 4 4L19 6"/></svg>',
     alert: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 4.6 2.8 17.5A1.9 1.9 0 0 0 4.4 20h15.2a1.9 1.9 0 0 0 1.6-2.5L13.7 4.6a1.9 1.9 0 0 0-3.4 0Z"/></svg>',
     info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>',
-    plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>'
+    plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+    play: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.5v13l10-6.5-10-6.5Z"/></svg>'
   };
 
   const state = {
@@ -794,7 +861,8 @@ main { width: min(1500px, 100%); margin: 0 auto; padding: 34px clamp(18px, 4vw, 
     loading: false,
     controller: null,
     modalSlug: null,
-    lastFocus: null
+    lastFocus: null,
+    previewFocus: null
   };
 
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -818,6 +886,14 @@ main { width: min(1500px, 100%); margin: 0 auto; padding: 34px clamp(18px, 4vw, 
   const modal = $("#modal");
   const modalBody = $("#modalBody");
   const modalClose = $("#modalClose");
+  const previewModal = $("#preview");
+  const previewVideo = $("#previewVideo");
+  const previewTitle = $("#previewTitle");
+  const previewMeta = $("#previewMeta");
+  const previewStatus = $("#previewStatus");
+  const previewOpen = $("#previewOpen");
+  const previewUrlLabel = $("#previewUrlLabel");
+  const previewClose = $("#previewClose");
   const toasts = $("#toasts");
 
   // ---------- helpers ----------
@@ -833,6 +909,10 @@ main { width: min(1500px, 100%); margin: 0 auto; padding: 34px clamp(18px, 4vw, 
     node.type = "button";
     node.addEventListener("click", onClick);
     return node;
+  }
+
+  function syncBodyLock() {
+    document.body.classList.toggle("modal-open", !modal.hidden || !previewModal.hidden);
   }
 
   function initials(title) {
@@ -1161,6 +1241,7 @@ main { width: min(1500px, 100%); margin: 0 auto; padding: 34px clamp(18px, 4vw, 
       if (!library) continue;
       const card = el("div", "path-card");
       card.appendChild(el("div", "path-head", `${lang} library`));
+      card.appendChild(el("p", "path-note", "Add Shows as a Jellyfin TV Shows library and Movies as a Jellyfin Movies library. New files appear after Jellyfin scans."));
       card.appendChild(pathRow("Shows", library.shows));
       card.appendChild(pathRow("Movies", library.movies));
       libraryPaths.appendChild(card);
@@ -1196,7 +1277,7 @@ main { width: min(1500px, 100%); margin: 0 auto; padding: 34px clamp(18px, 4vw, 
   function closeModal() {
     if (modal.hidden) return;
     modal.hidden = true;
-    document.body.classList.remove("modal-open");
+    syncBodyLock();
     state.modalSlug = null;
     modalBody.replaceChildren();
     if (state.lastFocus && typeof state.lastFocus.focus === "function") state.lastFocus.focus();
@@ -1207,7 +1288,7 @@ main { width: min(1500px, 100%); margin: 0 auto; padding: 34px clamp(18px, 4vw, 
     state.modalSlug = slug;
     state.lastFocus = document.activeElement;
     modal.hidden = false;
-    document.body.classList.add("modal-open");
+    syncBodyLock();
     modalBody.className = "modal-loading";
     modalBody.textContent = "Loading title…";
     modalClose.focus();
@@ -1248,11 +1329,16 @@ main { width: min(1500px, 100%); margin: 0 auto; padding: 34px clamp(18px, 4vw, 
     const addDub = button(`Add Dub`, "btn primary", () => addSelection(detail.slug, "dub", addDub));
     const addSub = button(`Add Sub`, "btn ghost", () => addSelection(detail.slug, "sub", addSub));
     const addBoth = button(`Add Both`, "btn ghost", () => addSelection(detail.slug, "both", addBoth));
+    const previewLang = state.lang === "both" ? "dub" : state.lang;
+    const previewNumber = detail.kind === "movie" ? null : ((detail.episodes || [])[0]?.number ?? null);
+    const previewButton = button(`Preview ${langLabel(previewLang)}`, "btn ghost",
+      () => openPreview(detail, previewNumber, previewLang));
+    previewButton.disabled = detail.kind !== "movie" && previewNumber === null;
     if (isSelectedSlug(detail.slug)) {
       const badge = el("span", "badge badge-accent", "In library");
       actions.appendChild(badge);
     }
-    actions.append(addDub, addSub, addBoth);
+    actions.append(addDub, addSub, addBoth, previewButton);
 
     const episodeBlock = el("div", "episode-block");
     const episodeHeading = el("h4", "",
@@ -1263,6 +1349,13 @@ main { width: min(1500px, 100%); margin: 0 auto; padding: 34px clamp(18px, 4vw, 
         const row = el("div", "episode");
         row.appendChild(el("span", "episode-num", `E${String(episode.number).padStart(2, "0")}`));
         row.appendChild(el("span", "episode-title", episode.title || "Untitled"));
+        const playButton = el("button", "episode-preview");
+        playButton.type = "button";
+        playButton.title = `Preview E${String(episode.number).padStart(2, "0")} ${langLabel(previewLang)}`;
+        playButton.setAttribute("aria-label", playButton.title);
+        playButton.innerHTML = ICONS.play;
+        playButton.addEventListener("click", () => openPreview(detail, episode.number, previewLang));
+        row.appendChild(playButton);
         episodeList.appendChild(row);
       }
     } else {
@@ -1275,6 +1368,108 @@ main { width: min(1500px, 100%); margin: 0 auto; padding: 34px clamp(18px, 4vw, 
 
     info.append(title, meta, description, genres, actions, episodeBlock);
     modalBody.append(posterWrap, info);
+  }
+
+  // ---------- preview ----------
+  let previewHls = null;
+  let previewHlsLoader = null;
+  let previewRequest = 0;
+
+  function setPreviewStatus(message, isError = false) {
+    previewStatus.textContent = message || "";
+    previewStatus.hidden = !message;
+    previewStatus.classList.toggle("error", isError);
+  }
+
+  function ensureHls() {
+    if (window.Hls) return Promise.resolve(window.Hls);
+    if (previewHlsLoader) return previewHlsLoader;
+    previewHlsLoader = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = "https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js";
+      script.async = true;
+      script.onload = () => window.Hls ? resolve(window.Hls) : reject(new Error("The HLS player loaded but did not initialize."));
+      script.onerror = () => {
+        previewHlsLoader = null;
+        reject(new Error("Could not load the HLS player from the CDN."));
+      };
+      document.head.appendChild(script);
+    });
+    return previewHlsLoader;
+  }
+
+  function openPreview(detail, number, lang) {
+    const movie = detail.kind === "movie";
+    const episodeNumber = movie ? null : (number ?? (detail.episodes?.[0]?.number ?? null));
+    if (!movie && episodeNumber === null) {
+      toast("This title has no episode to preview.", "error");
+      return;
+    }
+    const tail = movie ? "movie" : encodeURIComponent(String(episodeNumber));
+    const url = `/play/${encodeURIComponent(detail.slug)}/${tail}/${lang}`;
+    const label = movie ? "Movie" : `Episode ${episodeNumber}`;
+    state.previewFocus = document.activeElement;
+    previewTitle.textContent = detail.title;
+    previewMeta.textContent = `${label} · ${langLabel(lang)} · proxied HLS`;
+    previewOpen.href = url;
+    previewUrlLabel.textContent = url;
+    previewModal.hidden = false;
+    syncBodyLock();
+    previewClose.focus();
+    previewRequest += 1;
+    const request = previewRequest;
+    if (previewHls) { previewHls.destroy(); previewHls = null; }
+    previewVideo.pause();
+    previewVideo.removeAttribute("src");
+    previewVideo.load();
+    setPreviewStatus("Loading stream…");
+    const native = previewVideo.canPlayType("application/vnd.apple.mpegurl");
+    if (native) {
+      previewVideo.src = url;
+      previewVideo.addEventListener("loadedmetadata", () => {
+        if (request !== previewRequest) return;
+        setPreviewStatus("");
+        previewVideo.play().catch(() => {});
+      }, { once: true });
+      previewVideo.addEventListener("error", () => {
+        if (request !== previewRequest) return;
+        setPreviewStatus("Could not load this stream. Try the HLS URL below.", true);
+      }, { once: true });
+      return;
+    }
+    ensureHls().then((Hls) => {
+      if (request !== previewRequest) return;
+      if (!Hls.isSupported()) throw new Error("HLS playback is not supported in this browser.");
+      previewHls = new Hls({ enableWorker: true });
+      previewHls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (request !== previewRequest) return;
+        setPreviewStatus("");
+        previewVideo.play().catch(() => {});
+      });
+      previewHls.on(Hls.Events.ERROR, (_event, data) => {
+        if (request !== previewRequest || !data.fatal) return;
+        setPreviewStatus(`Playback failed: ${data.details || "unknown error"}.`, true);
+      });
+      previewHls.loadSource(url);
+      previewHls.attachMedia(previewVideo);
+    }).catch((error) => {
+      if (request === previewRequest) setPreviewStatus(error.message || "Could not load the preview.", true);
+    });
+  }
+
+  function closePreview() {
+    if (previewModal.hidden) return;
+    const focusTarget = state.previewFocus;
+    state.previewFocus = null;
+    previewModal.hidden = true;
+    previewRequest += 1;
+    if (previewHls) { previewHls.destroy(); previewHls = null; }
+    previewVideo.pause();
+    previewVideo.removeAttribute("src");
+    previewVideo.load();
+    setPreviewStatus("");
+    syncBodyLock();
+    if (focusTarget && document.contains(focusTarget) && typeof focusTarget.focus === "function") focusTarget.focus();
   }
 
   // ---------- language ----------
@@ -1325,8 +1520,16 @@ main { width: min(1500px, 100%); margin: 0 auto; padding: 34px clamp(18px, 4vw, 
   modal.addEventListener("click", (event) => {
     if (event.target.closest("[data-close-modal]")) closeModal();
   });
+  previewClose.addEventListener("click", closePreview);
+  previewModal.addEventListener("click", (event) => {
+    if (event.target.closest("[data-close-preview]")) closePreview();
+  });
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
+      if (!previewModal.hidden) {
+        closePreview();
+        return;
+      }
       closeModal();
       if (document.activeElement === searchInput && searchInput.value) {
         searchInput.value = "";

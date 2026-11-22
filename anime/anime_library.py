@@ -503,6 +503,7 @@ class App:
             "description": plain_description(
                 show.get("description") or show.get("short_description") or ""),
             "genres": genres,
+            "kind": "movie" if LibraryWriter._is_movie(show) else "series",
             "episode_total": len(episodes),
             "episodes": [
                 {"number": LibraryWriter._episode_number(ep, index),
