@@ -38,6 +38,7 @@ ANIME_LIBRARY_URL = os.environ.get(
 ).rstrip("/")
 ANIME_LANG = os.environ.get("ANIME_LANG", "dub").strip().lower()
 CINECAT_LIBRARY_URL = os.environ.get("CINECAT_LIBRARY_URL", "").rstrip("/")
+FRAMEX_LIBRARY_URL = os.environ.get("FRAMEX_LIBRARY_URL", "").rstrip("/")
 LIBRARY_DIR = Path(os.environ.get("LIBRARY_DIR", "/library"))
 STATE_DIR = Path(os.environ.get("STATE_DIR", "/state"))
 STATE_FILE = STATE_DIR / "state.json"
@@ -396,12 +397,17 @@ class Cinecat:
         return selection if isinstance(selection, dict) else None
 
 
+class Framex(Cinecat):
+    """Client for the local FramexTV 1080p selector/proxy."""
+
+
 class Fulfiller:
     def __init__(self):
         self.seerr = Seerr(SEERR_URL, SEERR_API_KEY)
         self.vod = VodCatalog()
         self.anime = Anime(ANIME_LIBRARY_URL, ANIME_LANG)
         self.cinecat = Cinecat(CINECAT_LIBRARY_URL)
+        self.framex = Framex(FRAMEX_LIBRARY_URL)
         self.state = self._load_state()
         self._jellyfin_uid = None
 
@@ -670,6 +676,29 @@ class Fulfiller:
             files.append(text)
         return {
             "kind": "cinecat",
+            "media_type": details["media_type"],
+            "tmdb_id": details.get("tmdb_id"),
+            "title": details.get("title") or selection.get("title"),
+            "year": details.get("year") or selection.get("year"),
+            "seasons": selection.get("seasons") or [],
+            "files": files,
+        }
+
+    def _framex(self, details: dict):
+        selection = self.framex.select(details)
+        if not selection:
+            return None
+        files = []
+        for name in selection.get("files") or []:
+            text = str(name)
+            # framex-library writes /data/requests; the fulfiller mounts that
+            # same tree at /library. Keep state paths in the fulfiller namespace.
+            marker = "/data/requests/"
+            if text.startswith(marker):
+                text = str(LIBRARY_DIR / text[len(marker):])
+            files.append(text)
+        return {
+            "kind": "framex",
             "media_type": details["media_type"],
             "tmdb_id": details.get("tmdb_id"),
             "title": details.get("title") or selection.get("title"),
@@ -1004,7 +1033,7 @@ class Fulfiller:
                 media_type == "movie"
                 or set(requested_seasons).issubset(materialized)
                 or (
-                    previous.get("kind") != "cinecat"
+                    previous.get("kind") not in ("cinecat", "framex")
                     and not self._has_unmaterialized_season(
                         tmdb_id, requested_seasons, materialized
                     )
@@ -1025,6 +1054,8 @@ class Fulfiller:
                 set(previous.get("seasons") or []) | set(requested_seasons)
             )
         result = self._anime(details)
+        if not result:
+            result = self._framex(details)
         if not result:
             result = self._cinecat(details)
         if not result:
@@ -1072,6 +1103,8 @@ class Fulfiller:
                 continue
             details["_seasons"] = list(item.get("seasons") or [])
             result = self._anime(details)
+            if not result:
+                result = self._framex(details)
             if not result:
                 result = self._cinecat(details)
             if result:

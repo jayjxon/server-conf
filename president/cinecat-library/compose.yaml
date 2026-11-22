@@ -15,6 +15,9 @@ services:
             # under requests/ so the existing request library picks them up
             CINECAT_MEDIA_DIR: /data
             CINECAT_PUBLIC_URL: https://scraper.${DOMAINNAME}/cinecat
+            # .strm files use the stable gateway route; the proxy remains
+            # under CINECAT_PUBLIC_URL for the manifest/segment segments.
+            CINECAT_STRM_PUBLIC_URL: https://scraper.${DOMAINNAME}
             CINECAT_DATA_DIR: /state
             CINECAT_SITE_URL: ${CINECAT_SITE_URL:-https://beta.cinecat.eu}
         volumes:

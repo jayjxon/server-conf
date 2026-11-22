@@ -325,9 +325,11 @@ class Signer:
 class LibraryWriter:
     """Writes CineCat entries into the existing Jellyfin request tree."""
 
-    def __init__(self, media_root: Path, public_url: str, state_path: Path):
+    def __init__(self, media_root: Path, public_url: str, state_path: Path,
+                 strm_url: str | None = None):
         self.root = Path(media_root).expanduser().resolve() / "requests"
         self.public_url = public_url.rstrip("/")
+        self.strm_url = (strm_url or public_url).rstrip("/")
         self.state_path = Path(state_path)
         self.lock = threading.Lock()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -393,13 +395,13 @@ class LibraryWriter:
                 if path.suffix != ".strm" or not self._within_root(path):
                     continue
                 if media_type == "movie":
-                    url = f"{self.public_url}/play/movie/{tmdb_id}"
+                    url = f"{self.strm_url}/play/movie/{tmdb_id}"
                 else:
                     match = re.search(r" - S(\d+)E(\d+) - ", path.name)
                     if not match:
                         continue
                     url = (
-                        f"{self.public_url}/play/tv/{tmdb_id}/"
+                        f"{self.strm_url}/play/tv/{tmdb_id}/"
                         f"{int(match.group(1))}/{int(match.group(2))}"
                     )
                 try:
@@ -498,7 +500,7 @@ class LibraryWriter:
                     strm = folder / f"{label}.strm"
                     nfo = folder / f"{label}.nfo"
                     self._strm(
-                        strm, f"{self.public_url}/play/movie/{tmdb_id}"
+                        strm, f"{self.strm_url}/play/movie/{tmdb_id}"
                     )
                     self._write(nfo, self._movie_nfo(title, year, tmdb_id))
                     files.extend([str(strm), str(nfo)])
@@ -530,7 +532,7 @@ class LibraryWriter:
                             nfo = season_dir / f"{stem}.nfo"
                             self._strm(
                                 strm,
-                                f"{self.public_url}/play/tv/{tmdb_id}/"
+                                f"{self.strm_url}/play/tv/{tmdb_id}/"
                                 f"{season}/{episode}",
                             )
                             self._write(
@@ -586,7 +588,7 @@ class App:
         )
         if rewritten:
             self.log(
-                f"rewrote {rewritten} .strm URLs to {self.writer.public_url}"
+                f"rewrote {rewritten} .strm URLs to {self.writer.strm_url}"
             )
 
     def log(self, message: str) -> None:
@@ -974,6 +976,10 @@ def parse_args(argv=None):
         default=_env("CINECAT_DATA_DIR", default="./cinecat-data"),
     )
     parser.add_argument(
+        "--strm-url",
+        default=_env("CINECAT_STRM_PUBLIC_URL"),
+    )
+    parser.add_argument(
         "--api-base",
         default=_env("CINECAT_API_BASE", default=DEFAULT_API_BASE),
     )
@@ -1008,7 +1014,10 @@ def main(argv=None) -> int:
         timeout=args.timeout,
     )
     writer = LibraryWriter(
-        Path(args.media_dir), public_url, data_dir / "state.json"
+        Path(args.media_dir),
+        public_url,
+        data_dir / "state.json",
+        strm_url=args.strm_url or public_url,
     )
     app = App(source, writer, data_dir)
     app.verbose = args.verbose

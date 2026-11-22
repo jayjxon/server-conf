@@ -81,12 +81,14 @@ access_control:
           subject:
               - 'group:admins'
 
-        # both scraper proxies live under one host. authelia sees the prefixed
-        # path; traefik strips /anime or /cinecat before forwarding. only the
-        # player namespaces are public; the selector APIs stay admins-only.
+        # all scraper proxies live under one host. authelia sees the prefixed
+        # path; traefik strips /anime, /cinecat or /framex before forwarding.
+        # only the player namespaces are public; the selector APIs stay admins-only.
+        # /play is the source-independent facade used by .strm files.
         - domain: 'scraper.${DOMAINNAME}'
           resources:
-              - '^/(anime|cinecat)/(play|p)/.*'
+              - '^/(anime|cinecat|framex)/(play|p)/.*'
+              - '^/play/.*'
           policy: 'bypass'
 
         - domain: 'scraper.${DOMAINNAME}'
