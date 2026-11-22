@@ -43,6 +43,7 @@ STATE_FILE = STATE_DIR / "state.json"
 POLL_SECONDS = max(10, int(os.environ.get("POLL_SECONDS", "30")))
 RECONCILE_SECONDS = max(300, int(os.environ.get("RECONCILE_SECONDS", "21600")))
 HTTP_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "30"))
+SUBTITLE_LANGUAGE = os.environ.get("SUBTITLE_LANGUAGE", "eng").strip() or "eng"
 
 _BAD_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _YEAR_IN_TITLE = re.compile(
@@ -336,6 +337,7 @@ class Fulfiller:
         self.vod = VodCatalog()
         self.anime = Anime(ANIME_LIBRARY_URL, ANIME_LANG)
         self.state = self._load_state()
+        self._jellyfin_uid = None
 
     @staticmethod
     def _load_state() -> dict:
@@ -590,6 +592,229 @@ class Fulfiller:
         available = {_int(episode.season_number, 1) for episode, _ in hit[1]}
         return bool(available - materialized)
 
+    @staticmethod
+    def _jellyfin_headers() -> dict:
+        return {"Authorization": f'MediaBrowser Token="{JELLYFIN_API_KEY}"'}
+
+    def _jellyfin_get(self, path: str):
+        code, data = http_json(
+            "GET",
+            JELLYFIN_URL.rstrip("/") + path,
+            headers=self._jellyfin_headers(),
+            timeout=20,
+        )
+        if code != 200 or not isinstance(data, dict):
+            log(f"jellyfin {path.split('?', 1)[0]} returned HTTP {code}")
+            return None
+        return data
+
+    def _jellyfin_user_id(self):
+        if self._jellyfin_uid:
+            return self._jellyfin_uid
+        if not JELLYFIN_API_KEY:
+            return None
+        code, data = http_json(
+            "GET",
+            JELLYFIN_URL.rstrip("/") + "/Users",
+            headers=self._jellyfin_headers(),
+            timeout=20,
+        )
+        if code != 200 or not isinstance(data, list):
+            log(f"jellyfin /Users returned HTTP {code}")
+            return None
+        for user in data:
+            if not (user.get("Policy") or {}).get("IsDisabled"):
+                self._jellyfin_uid = str(user.get("Id") or "")
+                break
+        return self._jellyfin_uid
+
+    @staticmethod
+    def _subtitle_sidecar(strm_path) -> str:
+        return str(Path(str(strm_path)).with_suffix(".en.srt"))
+
+    def _missing_sidecars(self, item: dict) -> list[str]:
+        return [
+            str(path)
+            for path in item.get("files") or []
+            if str(path).endswith(".strm")
+            and not Path(self._subtitle_sidecar(path)).is_file()
+        ]
+
+    def _with_subtitle_state(self, result, previous: dict):
+        """Carry the subtitle work state without making every poll look changed."""
+        if not result or result.get("kind") != "vod":
+            return result
+        old_status = previous.get("subtitles")
+        files_changed = previous.get("files") != result.get("files")
+        attempts = _int(previous.get("subtitle_attempts"), 0) or 0
+        if self._missing_sidecars(result):
+            if old_status == "failed" and not files_changed:
+                result["subtitles"] = "failed"
+                result["subtitle_attempts"] = attempts
+            else:
+                result["subtitles"] = "pending"
+                result["subtitle_attempts"] = 0 if files_changed else attempts
+        elif old_status:
+            result["subtitles"] = "done"
+            result.pop("subtitle_attempts", None)
+        return result
+
+    def _jellyfin_media_items(self, item: dict) -> list[dict]:
+        """Return the Jellyfin items whose paths are in this state entry."""
+        uid = self._jellyfin_user_id()
+        if not uid:
+            return []
+        title = str(item.get("title") or "").strip()
+        media_type = item.get("media_type")
+        tmdb_id = _int(item.get("tmdb_id"))
+        names = {
+            Path(str(path)).name
+            for path in item.get("files") or []
+            if str(path).endswith(".strm")
+        }
+        if not names or not title:
+            return []
+        fields = "Path,MediaStreams"
+        if media_type == "movie":
+            query = urllib.parse.urlencode(
+                {
+                    "searchTerm": title,
+                    "recursive": "true",
+                    "includeItemTypes": "Movie",
+                    "fields": fields,
+                    "limit": "100",
+                }
+            )
+            data = self._jellyfin_get(f"/Users/{uid}/Items?{query}")
+            return [
+                media
+                for media in (data or {}).get("Items") or []
+                if Path(str(media.get("Path") or "")).name in names
+            ]
+        query = urllib.parse.urlencode(
+            {
+                "searchTerm": title,
+                "recursive": "true",
+                "includeItemTypes": "Series",
+                "fields": "Path",
+                "limit": "50",
+            }
+        )
+        data = self._jellyfin_get(f"/Users/{uid}/Items?{query}")
+        series_rows = (data or {}).get("Items") or []
+        marker = f"[tmdbid-{tmdb_id}]" if tmdb_id else ""
+        result = []
+        for series in series_rows:
+            if marker and marker not in str(series.get("Path") or ""):
+                continue
+            episode_query = urllib.parse.urlencode(
+                {"userId": uid, "fields": fields}
+            )
+            episodes = self._jellyfin_get(
+                f"/Shows/{series.get('Id')}/Episodes?{episode_query}"
+            )
+            for episode in (episodes or {}).get("Items") or []:
+                if Path(str(episode.get("Path") or "")).name in names:
+                    result.append(episode)
+        return result
+
+    def _ensure_external_subtitles(self, item: dict) -> bool:
+        """Download one external subtitle for each new .strm, if Jellyfin can."""
+        if item.get("subtitles") != "pending":
+            return False
+        if not JELLYFIN_API_KEY:
+            item["subtitles"] = "disabled"
+            if not _refresh_warning:
+                log("JELLYFIN_API_KEY is not set; cannot fetch external subtitles")
+            return False
+        media_items = self._jellyfin_media_items(item)
+        if not media_items:
+            attempts = (_int(item.get("subtitle_attempts"), 0) or 0) + 1
+            item["subtitle_attempts"] = attempts
+            if attempts >= 4:
+                item["subtitles"] = "failed"
+                log(f"external subtitles: Jellyfin never listed {item.get('title')!r}")
+            return False
+        by_name = {
+            Path(str(media.get("Path") or "")).name: media
+            for media in media_items
+        }
+        expected = [
+            str(path)
+            for path in item.get("files") or []
+            if str(path).endswith(".strm")
+        ]
+        downloaded = 0
+        unavailable = 0
+        waiting = 0
+        for strm in expected:
+            sidecar = self._subtitle_sidecar(strm)
+            if Path(sidecar).is_file():
+                continue
+            media = by_name.get(Path(strm).name)
+            if not media:
+                waiting += 1
+                continue
+            # A deleted sidecar can still be listed as an external stream until
+            # the next scan, so the file on disk is the source of truth here.
+            item_id = media.get("Id")
+            search_path = f"/Items/{item_id}/RemoteSearch/Subtitles/{SUBTITLE_LANGUAGE}"
+            code, candidates = http_json(
+                "GET",
+                JELLYFIN_URL.rstrip("/") + search_path,
+                headers=self._jellyfin_headers(),
+                timeout=30,
+            )
+            if code != 200 or not isinstance(candidates, list):
+                waiting += 1
+                continue
+            candidates = [
+                candidate
+                for candidate in candidates
+                if "subf2m"
+                in str(candidate.get("Id") or "").lower()
+            ]
+            if not candidates:
+                unavailable += 1
+                continue
+            subtitle_id = urllib.parse.quote(
+                str(candidates[0].get("Id") or ""), safe=""
+            )
+            code, _ = http_json(
+                "POST",
+                JELLYFIN_URL.rstrip("/")
+                + f"/Items/{item_id}/RemoteSearch/Subtitles/{subtitle_id}",
+                headers=self._jellyfin_headers(),
+                timeout=30,
+            )
+            if code not in (200, 204):
+                waiting += 1
+                log(
+                    f"external subtitle download for {Path(strm).name!r} "
+                    f"returned HTTP {code}"
+                )
+                continue
+            downloaded += 1
+            log(f"external subtitle saved for {Path(strm).name!r}")
+        if waiting:
+            attempts = (_int(item.get("subtitle_attempts"), 0) or 0) + 1
+            item["subtitle_attempts"] = attempts
+            if attempts >= 4:
+                item["subtitles"] = "failed"
+                log(
+                    f"external subtitles: gave up on {item.get('title')!r} "
+                    f"after {attempts} attempts ({waiting} items waiting)"
+                )
+            return downloaded > 0
+        item["subtitles"] = "done"
+        item.pop("subtitle_attempts", None)
+        if downloaded or unavailable:
+            log(
+                f"external subtitles for {item.get('title')!r}: "
+                f"{downloaded} saved, {unavailable} unavailable"
+            )
+        return downloaded > 0
+
     def _refresh_jellyfin(self) -> None:
         global _refresh_warning
         if not JELLYFIN_API_KEY:
@@ -638,6 +863,12 @@ class Fulfiller:
                 )
             )
         ):
+            if previous.get("subtitles") == "pending":
+                if self._ensure_external_subtitles(previous):
+                    self._save_state()
+                    self._refresh_jellyfin()
+                else:
+                    self._save_state()
             return
         if media_type == "tv":
             details["_seasons"] = sorted(
@@ -646,6 +877,8 @@ class Fulfiller:
         result = self._vprint(media_type, tmdb_id, details)
         if not result:
             result = self._anime(details)
+        if result:
+            result = self._with_subtitle_state(result, previous)
         if not result:
             if pending:
                 if self.seerr.decline(request_id):
@@ -688,6 +921,7 @@ class Fulfiller:
             if not result:
                 log(f"reconcile: {media_type} {tmdb_id} is no longer in Dispatcharr")
                 continue
+            result = self._with_subtitle_state(result, item)
             self._prune(item.get("files") or [], result.get("files") or [])
             if result != item:
                 self.state["items"][key] = result
