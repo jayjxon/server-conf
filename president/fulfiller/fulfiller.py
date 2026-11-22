@@ -225,6 +225,20 @@ class Seerr:
             return False
         return True
 
+    def media_status(self, media_id: int, status: str, seasons=None) -> bool:
+        payload = {"is4k": False}
+        if seasons:
+            payload["seasons"] = [
+                {"seasonNumber": int(number)} for number in seasons
+            ]
+        code, _ = self.call(
+            f"/media/{int(media_id)}/{status}", "POST", payload
+        )
+        if code not in (200, 202):
+            log(f"seerr media {media_id} {status} returned HTTP {code}")
+            return False
+        return True
+
 
 class VodCatalog:
     def __init__(self):
@@ -664,6 +678,8 @@ class Fulfiller:
         elif old_status:
             result["subtitles"] = "done"
             result.pop("subtitle_attempts", None)
+        if previous.get("seerr_status"):
+            result["seerr_status"] = previous["seerr_status"]
         return result
 
     def _jellyfin_media_items(self, item: dict) -> list[dict]:
@@ -822,6 +838,47 @@ class Fulfiller:
             )
         return downloaded > 0
 
+    def _mark_seerr_available(
+        self, request: dict, item: dict, requested_seasons: list[int]
+    ) -> bool:
+        """Tell Seerr the media is playable; there is no Radarr/Sonarr webhook."""
+        if item.get("seerr_status") in ("available", "partial"):
+            return False
+        media = request.get("media") if isinstance(request.get("media"), dict) else {}
+        media_id = _int(media.get("id"))
+        if not media_id:
+            log(f"seerr media id missing for request {request.get('id')}")
+            return False
+        if item.get("media_type") == "movie":
+            if not self.seerr.media_status(media_id, "available"):
+                return False
+            item["seerr_status"] = "available"
+            return True
+        seasons = sorted(
+            {
+                number
+                for number in (
+                    _int(value)
+                    for value in (item.get("seasons") or requested_seasons)
+                )
+                if number is not None
+            }
+        )
+        if not seasons:
+            log(f"seerr media {media_id}: no seasons to mark available")
+            return False
+        status = (
+            "available"
+            if set(seasons).issuperset(set(requested_seasons or seasons))
+            else "partial"
+        )
+        if not self.seerr.media_status(
+            media_id, status, seasons if status == "available" else None
+        ):
+            return False
+        item["seerr_status"] = status
+        return True
+
     def _refresh_jellyfin(self) -> None:
         global _refresh_warning
         if not JELLYFIN_API_KEY:
@@ -856,6 +913,8 @@ class Fulfiller:
         key = f"{media_type}:{tmdb_id}"
         previous = self.state["items"].get(key) or {}
         if not pending and previous.get("kind") == "anime" and previous.get("slug"):
+            if self._mark_seerr_available(request, previous, requested_seasons):
+                self._save_state()
             return
         materialized = set(previous.get("seasons") or [])
         if (
@@ -876,6 +935,8 @@ class Fulfiller:
                     self._refresh_jellyfin()
                 else:
                     self._save_state()
+            if self._mark_seerr_available(request, previous, requested_seasons):
+                self._save_state()
             return
         if media_type == "tv":
             details["_seasons"] = sorted(
@@ -906,6 +967,8 @@ class Fulfiller:
             self._refresh_jellyfin()
         if pending and not self.seerr.approve(request_id):
             return
+        if self._mark_seerr_available(request, result, requested_seasons):
+            self._save_state()
         log(
             f"{'approved' if pending else 'materialized'} {media_type} {tmdb_id}: "
             f"{result.get('title')!r} ({result.get('kind')})"
