@@ -43,6 +43,7 @@ import threading
 import time
 import uuid
 import zlib
+from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -68,6 +69,69 @@ def safe_name(value, limit: int = 120) -> str:
 
 def human_count(value: int) -> str:
     return f"{value:,}"
+
+
+class _DescriptionParser(HTMLParser):
+    """Convert catalogue HTML into readable plain text."""
+
+    _LINE_BREAKS = {"br"}
+    _BLOCKS = {"p", "div", "li", "tr", "blockquote",
+               "h1", "h2", "h3", "h4", "h5", "h6"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self._ignored = 0
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if tag in ("script", "style"):
+            self._ignored += 1
+        elif tag in self._LINE_BREAKS:
+            self.parts.append("\n")
+        elif tag in self._BLOCKS:
+            self.parts.append("\n\n")
+
+    def handle_startendtag(self, tag, attrs):
+        tag = tag.lower()
+        if tag in self._LINE_BREAKS:
+            self.parts.append("\n")
+        elif tag in self._BLOCKS:
+            self.parts.append("\n\n")
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag in ("script", "style"):
+            self._ignored = max(0, self._ignored - 1)
+        elif tag in self._LINE_BREAKS:
+            self.parts.append("\n")
+        elif tag in self._BLOCKS:
+            self.parts.append("\n\n")
+
+    def handle_data(self, data):
+        if not self._ignored:
+            self.parts.append(data)
+
+
+def plain_description(value) -> str:
+    """Strip description markup and the trailing MAL credit."""
+    if not value:
+        return ""
+    parser = _DescriptionParser()
+    try:
+        parser.feed(str(value))
+        parser.close()
+    except Exception:
+        text = re.sub(r"<[^>]+>", " ", str(value).replace("\xa0", " "))
+        text = re.sub(r"\s+", " ", text).strip()
+        return re.sub(r"\s*\[Written by [^\]]+\]\s*$", "", text,
+                      flags=re.IGNORECASE).strip()
+    text = "".join(parser.parts).replace("\xa0", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return re.sub(r"\s*\[Written by [^\]]+\]\s*$", "", text,
+                  flags=re.IGNORECASE).strip()
 
 
 def _read_json(path: Path):
@@ -436,8 +500,8 @@ class App:
                 genres.append(str(name))
         detail = self._card(show)
         detail.update({
-            "description": show.get("description")
-                           or show.get("short_description") or "",
+            "description": plain_description(
+                show.get("description") or show.get("short_description") or ""),
             "genres": genres,
             "episode_total": len(episodes),
             "episodes": [
@@ -456,12 +520,12 @@ class App:
         if isinstance(value, str):
             value = value.strip().lower()
             if value == "both":
-                return ["sub", "dub"]
+                return ["dub", "sub"]
             if value in ("sub", "dub"):
                 return [value]
         if isinstance(value, (list, tuple)):
             lowered = {str(item).strip().lower() for item in value}
-            picked = [lang for lang in ("sub", "dub") if lang in lowered]
+            picked = [lang for lang in ("dub", "sub") if lang in lowered]
             if picked:
                 return picked
         raise ValueError("lang must be sub, dub or both")
@@ -513,7 +577,7 @@ class App:
 
     def config(self) -> dict:
         libraries = {}
-        for lang in ("sub", "dub"):
+        for lang in ("dub", "sub"):
             root = self.library.media_root / "anime" / lang
             libraries[lang] = {
                 "root": str(root),
@@ -712,7 +776,7 @@ class Handler(BaseHTTPRequestHandler):
                     payload = self._body()
                     selection = app.add_selection(
                         str(payload.get("slug") or ""),
-                        payload.get("lang") or payload.get("langs") or "sub")
+                        payload.get("lang") or payload.get("langs") or "dub")
                     return self._json(200, {"selection": selection})
                 if path == "/api/refresh":
                     removed = app.clear_cache()

@@ -11,7 +11,7 @@ catalog.py - an ergonomic client for a /data/* anime catalogue API.
 
     show = cat.show("my-show")
     ep = show.episode(2)
-    print(ep.title, [s.name for s in ep.servers("sub")])
+    print(ep.title, [s.name for s in ep.servers("dub")])
     print(ep.stream())                       # resolved .m3u8 URL
     ep.download("ep2.mp4", seconds=30)       # remuxed, no re-encode
 
@@ -23,7 +23,7 @@ CLI:
     python3 catalog.py --base URL search "my show"
     python3 catalog.py --base URL show my-show
     python3 catalog.py --base URL episodes my-show --all
-    python3 catalog.py --base URL stream my-show 2 --lang sub --server HD-1
+    python3 catalog.py --base URL stream my-show 2 --lang dub --server HD-1
     python3 catalog.py --base URL download my-show 2 -o ep2.mp4 -s 30
     python3 catalog.py --base URL probe https://host/player/123
     python3 catalog.py --base URL download my-show 2 -o ep2.mp4 --playlist URL
@@ -779,7 +779,7 @@ def _remux(ts_path: str, out_path: str, seconds, offset: float) -> None:
 class Catalog:
     """Entry point. One instance per origin; shows are cached by slug."""
 
-    def __init__(self, base: str, lang: str = "sub", timeout: float = DEFAULT_TIMEOUT,
+    def __init__(self, base: str, lang: str = "dub", timeout: float = DEFAULT_TIMEOUT,
                  user_agent: str = USER_AGENT,
                  sources_endpoint: str = DEFAULT_SOURCES_ENDPOINT):
         if not base:
@@ -1096,8 +1096,8 @@ def main(argv=None) -> int:
     )
     parser.add_argument("--base", default=os.environ.get("CATALOG_BASE"),
                         help="API origin (default: $CATALOG_BASE)")
-    parser.add_argument("--lang", default="sub", choices=("sub", "dub"),
-                        help="preferred server language (default: sub)")
+    parser.add_argument("--lang", default="dub", choices=("sub", "dub"),
+                        help="preferred server language (default: dub)")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     parser.add_argument("--json", action="store_true", help="print raw JSON")
     parser.add_argument("--sources-endpoint",
