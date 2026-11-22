@@ -406,7 +406,14 @@ class Fulfiller:
             try:
                 path.unlink()
             except OSError:
-                pass
+                continue
+            parent = path.parent
+            while parent != root:
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+                parent = parent.parent
 
     def _vprint(self, media_type: str, tmdb_id: int, details: dict):
         if not details:
