@@ -12,7 +12,7 @@ include:
     # services
     - ./jellyfin/compose.yaml
     - ./anime-library/compose.yaml
-    - ./framex-library/compose.yaml
+    - ./pressplayz-library/compose.yaml
     - ./stream-gateway/compose.yaml
     - ./dispatcharr/compose.yaml
     - ./seerr/compose.yaml

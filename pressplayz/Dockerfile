@@ -4,8 +4,8 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-COPY framex_library.py ./
+COPY pressplayz_library.py ./
 
 EXPOSE 8789
 
-CMD ["python3", "framex_library.py"]
+CMD ["python3", "pressplayz_library.py"]

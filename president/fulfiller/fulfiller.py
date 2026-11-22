@@ -37,7 +37,9 @@ ANIME_LIBRARY_URL = os.environ.get(
     "ANIME_LIBRARY_URL", "http://anime-library:8787"
 ).rstrip("/")
 ANIME_LANG = os.environ.get("ANIME_LANG", "dub").strip().lower()
-FRAMEX_LIBRARY_URL = os.environ.get("FRAMEX_LIBRARY_URL", "").rstrip("/")
+PRESS_PLAYZ_LIBRARY_URL = os.environ.get(
+    "PRESS_PLAYZ_LIBRARY_URL", ""
+).rstrip("/")
 LIBRARY_DIR = Path(os.environ.get("LIBRARY_DIR", "/library"))
 STATE_DIR = Path(os.environ.get("STATE_DIR", "/state"))
 STATE_FILE = STATE_DIR / "state.json"
@@ -359,8 +361,8 @@ class Anime:
         return True
 
 
-class Framex:
-    """Client for the local FramexTV 1080p selector/proxy."""
+class PressPlayZ:
+    """Client for the local PressPlayZ HLS selector/proxy."""
 
     def __init__(self, base: str):
         self.base = base.rstrip("/")
@@ -384,13 +386,13 @@ class Framex:
                 timeout=300,
             )
         except (urllib.error.URLError, OSError) as exc:
-            log(f"framex select failed: {exc}")
+            log(f"pressplayz select failed: {exc}")
             return None
         if code == 404:
             return None
         if code != 200 or not isinstance(data, dict):
             detail = data.get("error") if isinstance(data, dict) else ""
-            log(f"framex select returned HTTP {code}: {detail}")
+            log(f"pressplayz select returned HTTP {code}: {detail}")
             return None
         selection = data.get("selection")
         return selection if isinstance(selection, dict) else None
@@ -401,7 +403,7 @@ class Fulfiller:
         self.seerr = Seerr(SEERR_URL, SEERR_API_KEY)
         self.vod = VodCatalog()
         self.anime = Anime(ANIME_LIBRARY_URL, ANIME_LANG)
-        self.framex = Framex(FRAMEX_LIBRARY_URL)
+        self.pressplayz = PressPlayZ(PRESS_PLAYZ_LIBRARY_URL)
         self.state = self._load_state()
         self._jellyfin_uid = None
 
@@ -655,21 +657,21 @@ class Fulfiller:
             "files": [],
         }
 
-    def _framex(self, details: dict):
-        selection = self.framex.select(details)
+    def _pressplayz(self, details: dict):
+        selection = self.pressplayz.select(details)
         if not selection:
             return None
         files = []
         for name in selection.get("files") or []:
             text = str(name)
-            # framex-library writes /data/requests; the fulfiller mounts that
+            # pressplayz-library writes /data/requests; the fulfiller mounts that
             # same tree at /library. Keep state paths in the fulfiller namespace.
             marker = "/data/requests/"
             if text.startswith(marker):
                 text = str(LIBRARY_DIR / text[len(marker):])
             files.append(text)
         return {
-            "kind": "framex",
+            "kind": "pressplayz",
             "media_type": details["media_type"],
             "tmdb_id": details.get("tmdb_id"),
             "title": details.get("title") or selection.get("title"),
@@ -1004,7 +1006,7 @@ class Fulfiller:
                 media_type == "movie"
                 or set(requested_seasons).issubset(materialized)
                 or (
-                    previous.get("kind") != "framex"
+                    previous.get("kind") != "pressplayz"
                     and not self._has_unmaterialized_season(
                         tmdb_id, requested_seasons, materialized
                     )
@@ -1026,7 +1028,7 @@ class Fulfiller:
             )
         result = self._anime(details)
         if not result:
-            result = self._framex(details)
+            result = self._pressplayz(details)
         if not result:
             result = self._vprint(media_type, tmdb_id, details)
         if result:
@@ -1073,7 +1075,7 @@ class Fulfiller:
             details["_seasons"] = list(item.get("seasons") or [])
             result = self._anime(details)
             if not result:
-                result = self._framex(details)
+                result = self._pressplayz(details)
             if result:
                 # The request was fulfilled from VOD before a preferred source
                 # was available; replace those files with the new selection.

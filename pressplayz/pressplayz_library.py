@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""FramexTV 1080p library adapter for Jellyfin.
+"""PressPlayZ library adapter for Jellyfin.
 
-It resolves a TMDB id through FramexTV's public stream API, checks that the
-master has a 1080p H.264 rendition, and writes Jellyfin-ready `.strm` files.
-The URLs in those files point back here; this service resolves a fresh signed
-manifest on playback and proxies its segments with the upstream headers.
+PressPlayZ (https://pressplayz.top/) is a catalogue front-end: its watch pages
+carry the TMDB id and embed a VidNest player. The playable HLS streams therefore
+come from VidNest's public stream API, which this service queries directly by
+TMDB id. It writes Jellyfin-ready `.strm` files pointing at the stable gateway
+(`/play/...`) and proxies the resolved manifest's segments with the upstream
+headers.
 
-The service deliberately does not write anything unless a 1080p H.264 rendition
-is present. Sources below that are left for the Dispatcharr VOD fallback.
+VidNest exposes several upstreams per title (Nova/Comet/Zenith/Raven). This
+adapter walks them in order and takes the first HLS answer, preferring one that
+offers 1080p. Direct MP4 and DASH answers are skipped: Jellyfin's `.strm`
+playback here is HLS-only.
 
 Wire contract:
 
@@ -27,6 +31,7 @@ import base64
 import gzip
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -43,9 +48,13 @@ from urllib.request import Request, urlopen
 from xml.sax.saxutils import escape as xml_escape
 
 DEFAULT_PORT = 8789
-DEFAULT_API_BASE = "https://api.framextv.cc"
-DEFAULT_SITE_URL = "https://framextv.cc"
-DEFAULT_SUBS_BASE = ""
+DEFAULT_API_BASE = "https://vidnest.pro"
+DEFAULT_SITE_URL = "https://pressplayz.top"
+# the key the VidNest web player sends; it is public in the site's JS bundle
+DEFAULT_PLAYER_KEY = "3a67e8866ae1d2bb9e81fe7f73315a56eb3bdf5e3e755c7554c8be6910aa6b13"
+# Nova (the default) only has movies. Comet covers most of Severance S1, Raven
+# covers everything except S01E09, and Comet has that episode.
+DEFAULT_SOURCES = "j5wq,q7mv,vidora"
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
@@ -56,12 +65,12 @@ _RESOLUTION_RE = re.compile(r"\bRESOLUTION=(\d+)x(\d+)\b", re.I)
 _BANDWIDTH_RE = re.compile(r"\bBANDWIDTH=(\d+)\b", re.I)
 
 
-class FramexError(RuntimeError):
-    """FramexTV answered, but not with something this adapter can use."""
+class PressError(RuntimeError):
+    """PressPlayZ/VidNest answered, but not with something this adapter can use."""
 
 
-class NoSource(FramexError):
-    """No 1080p H.264 source exists for the requested title/episode."""
+class NoSource(PressError):
+    """No playable HLS source exists for the requested title/episode."""
 
 
 def safe_name(value, limit: int = 120) -> str:
@@ -103,54 +112,60 @@ def _origin(url: str) -> str:
 
 
 class Source:
-    """The FramexTV stream lookup plus its HLS master."""
+    """The VidNest stream lookup used by PressPlayZ's watch pages."""
 
     def __init__(
         self,
         api_base: str = DEFAULT_API_BASE,
         site_url: str = DEFAULT_SITE_URL,
-        subs_base: str = DEFAULT_SUBS_BASE,
+        player_key: str = DEFAULT_PLAYER_KEY,
+        sources: str = DEFAULT_SOURCES,
         timeout: float = 20.0,
     ):
         self.api_base = api_base.rstrip("/")
         self.site_url = site_url.rstrip("/")
-        self.subs_base = subs_base.rstrip("/")
+        self.player_key = player_key
+        self.sources = [part.strip() for part in sources.split(",") if part.strip()]
         self.timeout = float(timeout)
+        # the player only accepts requests carrying its own page as the referer
+        self.referer = self.api_base + "/"
 
     def _headers(self, accept: str = "application/json") -> dict:
-        return {
+        headers = {
             "Accept": accept,
             "Accept-Encoding": "identity",
             "User-Agent": USER_AGENT,
-            "Referer": self.site_url + "/",
-            "Origin": self.site_url,
+            "Referer": self.referer,
         }
+        if self.player_key:
+            headers["x-player-key"] = self.player_key
+        return headers
 
     def _allowed_url(self, url: str) -> bool:
-        """Only HTTPS FramexTV/API/relay hosts may be fetched."""
+        """Allow public HTTPS hosts; the proxy tokens are signed by this service."""
         parts = urlsplit(url)
         host = (parts.hostname or "").lower()
         if parts.scheme != "https" or not host:
             return False
-        api_host = (urlsplit(self.api_base).hostname or "").lower()
-        hosts = {
-            api_host,
-            "api.framextv.cc",
-            "api.framextv.xyz",
-            "api.framextv.tech",
-            "api.framextv.pro",
-            "framextv.cc",
-            "framextv.xyz",
-        }
-        suffixes = ("hybrows.workers.dev", "fractalmonument.xyz", "vercetti.org")
-        return host in hosts or any(
-            host == suffix or host.endswith("." + suffix)
-            for suffix in suffixes
+        if parts.username or parts.password:
+            return False
+        if host in ("localhost", "localhost.localdomain"):
+            return False
+        try:
+            address = ipaddress.ip_address(host.strip("[]"))
+        except ValueError:
+            return not host.endswith(".local")
+        return not (
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_reserved
+            or address.is_multicast
         )
 
     def _fetch(self, url: str, accept: str = "application/json", limit: int = 0):
         if not self._allowed_url(url):
-            raise FramexError(f"blocked untrusted upstream URL: {url}")
+            raise PressError(f"blocked untrusted upstream URL: {url}")
         request = Request(url, headers=self._headers(accept))
         try:
             with urlopen(request, timeout=self.timeout) as response:
@@ -159,65 +174,84 @@ class Source:
         except HTTPError as exc:
             if exc.code == 404:
                 raise NoSource(f"HTTP 404 for {url}") from exc
-            raise FramexError(f"HTTP {exc.code} for {url}") from exc
+            raise PressError(f"HTTP {exc.code} for {url}") from exc
         except (URLError, OSError, ValueError) as exc:
-            raise FramexError(f"{type(exc).__name__} for {url}: {exc}") from exc
+            raise PressError(f"{type(exc).__name__} for {url}: {exc}") from exc
 
     def _json(self, url: str):
         _, _, body = self._fetch(url)
         try:
             payload = json.loads(body.decode("utf-8", "replace"))
         except ValueError as exc:
-            raise FramexError(f"expected JSON from {url}") from exc
+            raise PressError(f"expected JSON from {url}") from exc
         return payload
 
     def _text(self, url: str) -> str:
-        _, _, body = self._fetch(url, "application/vnd.apple.mpegurl,*/*")
+        _, _, body = self._fetch(
+            url, "application/vnd.apple.mpegurl,*/*", limit=5_000_000
+        )
         return body.decode("utf-8", "replace")
 
-    def _sources(self, media_type: str, tmdb_id: int, season=None, episode=None) -> list[str]:
+    def _api_url(self, media_type: str, tmdb_id: int, season, episode, source: str):
         if media_type == "movie":
-            params = {"type": "movie", "id": str(int(tmdb_id))}
+            path = f"/api/stream/v1/movie/{int(tmdb_id)}"
         elif media_type == "tv":
             if season is None or episode is None:
                 raise NoSource("season and episode are required for TV")
-            params = {
-                "type": "tv",
-                "id": str(int(tmdb_id)),
-                "season": str(int(season)),
-                "episode": str(int(episode)),
-            }
+            path = (
+                f"/api/stream/v1/tv/{int(tmdb_id)}"
+                f"/{int(season)}/{int(episode)}"
+            )
         else:
             raise NoSource(f"unsupported media type {media_type!r}")
-        url = self.api_base + "/api/stream?" + urlencode(params)
-        data = self._json(url)
-        if not isinstance(data, dict) or not data.get("success"):
-            detail = data.get("error") if isinstance(data, dict) else ""
-            raise NoSource(f"FramexTV returned no source: {detail or url}")
-        sources = data.get("sources") or []
-        urls = []
-        for source in sources:
-            if not isinstance(source, dict):
-                continue
-            value = str(source.get("url") or "").strip()
-            if value.startswith("https://"):
-                urls.append(value)
-        if not urls:
-            raise NoSource(f"FramexTV returned no usable streams for {params}")
-        return urls
+        url = self.api_base + path
+        if source and source != "vidora":
+            url += "?" + urlencode({"source": source})
+        return url
 
-    def choose_1080p(self, media_type: str, tmdb_id: int, season=None, episode=None) -> str:
-        """Return the best 1080p H.264 variant, or raise NoSource."""
-        last_error = None
-        for master_url in self._sources(media_type, tmdb_id, season, episode):
+    def _candidates(self, media_type, tmdb_id, season, episode):
+        errors = []
+        for source in self.sources:
+            url = self._api_url(media_type, tmdb_id, season, episode, source)
             try:
-                text = self._text(master_url)
-            except FramexError as exc:
+                data = self._json(url)
+            except NoSource as exc:
+                errors.append(f"{source}: {exc}")
+                continue
+            except PressError as exc:
+                errors.append(f"{source}: {exc}")
+                continue
+            if not isinstance(data, dict) or not data.get("result"):
+                detail = data.get("message") if isinstance(data, dict) else ""
+                errors.append(f"{source}: {detail or 'no result'}")
+                continue
+            for entry in data.get("sources") or []:
+                if not isinstance(entry, dict):
+                    continue
+                value = str(entry.get("url") or "").strip()
+                if value.startswith("https://"):
+                    yield value, str(entry.get("source") or source)
+                    break
+        self._last_errors = errors
+
+    def choose_stream(self, media_type: str, tmdb_id: int, season=None, episode=None) -> str:
+        """Return a playable HLS playlist URL, or raise NoSource."""
+        last_error = None
+        for url, source in self._candidates(media_type, tmdb_id, season, episode):
+            try:
+                text = self._text(url)
+            except PressError as exc:
                 last_error = exc
                 continue
             if not text.lstrip().startswith("#EXTM3U"):
-                last_error = NoSource(f"not an HLS master: {master_url}")
+                # direct MP4 or a DASH manifest from this upstream; try the next
+                last_error = NoSource(f"{source} is not an HLS playlist: {url}")
                 continue
+            if "#EXT-X-STREAM-INF" not in text:
+                if "#EXTINF" not in text:
+                    last_error = NoSource(f"{source} playlist has no segments: {url}")
+                    continue
+                return url
 
             lines = text.splitlines()
             candidates = []
@@ -225,8 +259,7 @@ class Source:
                 if not line.startswith("#EXT-X-STREAM-INF:"):
                     continue
                 resolution = _RESOLUTION_RE.search(line)
-                if not resolution or int(resolution.group(2)) != 1080:
-                    continue
+                height = int(resolution.group(2)) if resolution else 0
                 variant = None
                 for following in lines[index + 1 :]:
                     following = following.strip()
@@ -239,73 +272,33 @@ class Source:
                 bandwidth = _BANDWIDTH_RE.search(line)
                 candidates.append(
                     (
+                        height,
                         int(bandwidth.group(1)) if bandwidth else 0,
-                        urljoin(master_url, variant),
+                        urljoin(url, variant),
                     )
                 )
             if not candidates:
-                last_error = NoSource(f"no 1080p variant in {master_url}")
+                last_error = NoSource(f"{source} master has no variants: {url}")
                 continue
-            variant_url = max(candidates, key=lambda item: item[0])[1]
+            variant_url = max(candidates, key=lambda item: (item[0], item[1]))[2]
             try:
                 playlist = self._text(variant_url)
-            except FramexError as exc:
+            except PressError as exc:
                 last_error = exc
                 continue
             if "#EXTINF" not in playlist:
-                last_error = NoSource(f"1080p playlist has no segments: {variant_url}")
+                last_error = NoSource(
+                    f"{source} variant has no segments: {variant_url}"
+                )
                 continue
             return variant_url
+        errors = "; ".join(getattr(self, "_last_errors", []) or [])
         raise NoSource(
-            f"no 1080p H.264 variant for {media_type} {tmdb_id}"
+            f"no HLS stream for {media_type} {tmdb_id}"
             + (f" S{int(season):02d}E{int(episode):02d}" if season and episode else "")
             + (f": {last_error}" if last_error else "")
+            + (f" ({errors})" if errors else "")
         )
-
-    def english_vtt(self, media_type: str, tmdb_id: int, season=None, episode=None):
-        """Return the first English VTT track, if the upstream has one."""
-        if not self.subs_base:
-            return None
-        if media_type == "movie":
-            path = f"/v1/movie/{int(tmdb_id)}"
-        elif media_type == "tv":
-            path = f"/v1/tv/{int(tmdb_id)}/{int(season or 1)}/{int(episode or 1)}"
-        else:
-            return None
-        try:
-            tracks = self._json(self.subs_base + path)
-        except FramexError:
-            return None
-        if not isinstance(tracks, list):
-            return None
-        chosen = None
-        for track in tracks:
-            if not isinstance(track, dict):
-                continue
-            label = str(track.get("label") or "").strip().lower()
-            url = str(track.get("file") or "").strip()
-            if url and (label == "english" or (chosen is None and label.startswith("english"))):
-                chosen = url
-                if label == "english":
-                    break
-        if not chosen:
-            return None
-        # The movie endpoint returns absolute cache URLs; the TV endpoint can
-        # return a site-relative path containing spaces. Normalise before the
-        # standard library builds the request.
-        chosen = quote(
-            urljoin(self.subs_base + "/", chosen), safe=":/?&=%._-~"
-        )
-        try:
-            _, _, body = self._fetch(chosen, "*/*", limit=2_000_000)
-        except FramexError:
-            return None
-        if body.startswith(b"\xef\xbb\xbf"):
-            body = body[3:]
-        head = body.lstrip()[:128]
-        if not (head.startswith(b"WEBVTT") or b"-->" in head):
-            return None
-        return body
 
 
 class Signer:
@@ -356,7 +349,7 @@ class Signer:
 
 
 class LibraryWriter:
-    """Writes FramexTV entries into the existing Jellyfin request tree."""
+    """Writes PressPlayZ entries into the existing Jellyfin request tree."""
 
     def __init__(self, media_root: Path, public_url: str, state_path: Path,
                  strm_url: str | None = None):
@@ -455,7 +448,7 @@ class LibraryWriter:
 
     def _movie_nfo(self, title: str, year, tmdb_id: int) -> str:
         return (
-            "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\n"
+            '<?xml version="1.0" encoding="utf-8" standalone="yes"?>\n'
             "<movie>\n"
             + self._tags(
                 {
@@ -470,7 +463,7 @@ class LibraryWriter:
 
     def _show_nfo(self, title: str, year, tmdb_id: int) -> str:
         return (
-            "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\n"
+            '<?xml version="1.0" encoding="utf-8" standalone="yes"?>\n'
             "<tvshow>\n"
             + self._tags({"title": title, "year": year, "tmdbid": tmdb_id})
             + "\n</tvshow>\n"
@@ -479,22 +472,13 @@ class LibraryWriter:
     @staticmethod
     def _episode_nfo(title: str, season: int, episode: int) -> str:
         return (
-            "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\n"
+            '<?xml version="1.0" encoding="utf-8" standalone="yes"?>\n'
             "<episodedetails>\n"
             f"  <title>{xml_escape(title)}</title>\n"
             f"  <season>{int(season)}</season>\n"
             f"  <episode>{int(episode)}</episode>\n"
             "</episodedetails>\n"
         )
-
-    def _sidecar(self, strm_path: Path, source: Source, media_type: str,
-                 tmdb_id: int, season=None, episode=None) -> list[str]:
-        body = source.english_vtt(media_type, tmdb_id, season, episode)
-        if not body:
-            return []
-        path = strm_path.with_suffix(".en.vtt")
-        self._write(path, body)
-        return [str(path)]
 
     def write(self, fields: dict, source: Source) -> dict:
         media_type = fields["media_type"]
@@ -529,7 +513,7 @@ class LibraryWriter:
                 if media_type == "movie":
                     folder = self.root / "Movies" / f"{label} [tmdbid-{tmdb_id}]"
                     dirs.add(str(folder))
-                    source.choose_1080p("movie", tmdb_id)
+                    source.choose_stream("movie", tmdb_id)
                     strm = folder / f"{label}.strm"
                     nfo = folder / f"{label}.nfo"
                     self._strm(
@@ -537,9 +521,6 @@ class LibraryWriter:
                     )
                     self._write(nfo, self._movie_nfo(title, year, tmdb_id))
                     files.extend([str(strm), str(nfo)])
-                    files.extend(
-                        self._sidecar(strm, source, "movie", tmdb_id)
-                    )
                 else:
                     folder = self.root / "Shows" / f"{label} [tmdbid-{tmdb_id}]"
                     dirs.add(str(folder))
@@ -554,7 +535,7 @@ class LibraryWriter:
                         season_dir = folder / f"Season {season:02d}"
                         dirs.add(str(season_dir))
                         for episode in range(1, count + 1):
-                            source.choose_1080p(
+                            source.choose_stream(
                                 "tv", tmdb_id, season=season, episode=episode
                             )
                             stem = (
@@ -575,22 +556,12 @@ class LibraryWriter:
                                 ),
                             )
                             files.extend([str(strm), str(nfo)])
-                            files.extend(
-                                self._sidecar(
-                                    strm,
-                                    source,
-                                    "tv",
-                                    tmdb_id,
-                                    season=season,
-                                    episode=episode,
-                                )
-                            )
             except Exception:
                 self._cleanup(files, dirs)
                 raise
             selection = {
                 "id": f"{key}:{int(time.time())}",
-                "kind": "framex",
+                "kind": "pressplayz",
                 "media_type": media_type,
                 "tmdb_id": tmdb_id,
                 "title": title,
@@ -615,11 +586,11 @@ class App:
         self.signer = Signer(self.data_dir / "proxy.secret")
         self._resolve_lock = threading.Lock()
         self._resolve_cache = {}
-        # resolved variant URLs are reused for a while; misses are cached too so a
+        # resolved playlists are reused for a while; misses are cached too so a
         # title the source does not carry is not re-queried on every playback
-        self._resolve_ttl = float(os.environ.get("FRAMEX_RESOLVE_TTL", "600"))
+        self._resolve_ttl = float(os.environ.get("PRESS_RESOLVE_TTL", "600"))
         self._resolve_miss_ttl = float(
-            os.environ.get("FRAMEX_RESOLVE_MISS_TTL", "300")
+            os.environ.get("PRESS_RESOLVE_MISS_TTL", "300")
         )
         self.timeout = source.timeout
         rewritten = self.writer.rewrite_stream_urls(
@@ -683,13 +654,13 @@ class App:
                         raise value
                     return value, referer
         try:
-            variant = self.source.choose_1080p(
+            variant = self.source.choose_stream(
                 media_type, tmdb_id, season=season, episode=episode
             )
-        except (NoSource, FramexError) as exc:
+        except (NoSource, PressError) as exc:
             self._remember(key, now, exc, None)
             raise
-        referer = self.source.site_url + "/"
+        referer = self.source.referer
         self._remember(key, now, variant, referer)
         return variant, referer
 
@@ -697,7 +668,7 @@ class App:
         variant, referer = self._resolve(media_type, tmdb_id, season, episode)
         text = self.source._text(variant)
         if not text.lstrip().startswith("#EXTM3U"):
-            raise FramexError(f"not an HLS playlist: {variant}")
+            raise PressError(f"not an HLS playlist: {variant}")
         return self.rewrite_manifest(text, variant, referer)
 
     def rewrite_manifest(self, text: str, base_url: str, referer: str) -> str:
@@ -757,7 +728,7 @@ class AppServer(ThreadingHTTPServer):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "FramexLibrary/1.0"
+    server_version = "PressPlayZLibrary/1.0"
 
     def log_message(self, fmt, *args):
         if getattr(self.server.app, "verbose", False):
@@ -831,9 +802,9 @@ class Handler(BaseHTTPRequestHandler):
                         {
                             "api_base": app.source.api_base,
                             "site_url": app.source.site_url,
+                            "sources": app.source.sources,
                             "public_url": app.writer.public_url,
                             "media_root": str(app.writer.root),
-                            "min_height": 1080,
                         },
                     )
                 if path == "/api/selected":
@@ -852,11 +823,11 @@ class Handler(BaseHTTPRequestHandler):
                 )
             return self._error(404, "not found")
         except NoSource as exc:
-            app.log(f"no 1080p source for {self.path}: {exc}")
+            app.log(f"no source for {self.path}: {exc}")
             self._error(404, str(exc))
         except ValueError as exc:
             self._error(400, str(exc))
-        except (FramexError, OSError) as exc:
+        except (PressError, OSError) as exc:
             app.log(f"request failed: {exc}")
             self._error(502, str(exc))
         except Exception as exc:  # pragma: no cover
@@ -910,7 +881,7 @@ class Handler(BaseHTTPRequestHandler):
             "User-Agent": USER_AGENT,
             "Accept": "*/*",
             "Accept-Encoding": "identity",
-            "Referer": referer or app.source.site_url + "/",
+            "Referer": referer or app.source.referer,
         }
         if referer:
             headers["Origin"] = _origin(referer).rstrip("/")
@@ -1022,35 +993,39 @@ def _env(*names, default=None):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="Resolve FramexTV 1080p HLS into a Jellyfin request library."
+        description="Resolve PressPlayZ/VidNest HLS into a Jellyfin request library."
     )
     parser.add_argument(
         "--media-dir",
-        default=_env("FRAMEX_MEDIA_DIR", "JELLYFIN_MEDIA_DIR", default="./framex-media"),
+        default=_env("PRESS_MEDIA_DIR", "JELLYFIN_MEDIA_DIR", default="./press-media"),
     )
     parser.add_argument(
         "--public-url",
-        default=_env("FRAMEX_PUBLIC_URL"),
+        default=_env("PRESS_PUBLIC_URL"),
     )
     parser.add_argument(
         "--data-dir",
-        default=_env("FRAMEX_DATA_DIR", default="./framex-data"),
+        default=_env("PRESS_DATA_DIR", default="./press-data"),
     )
     parser.add_argument(
         "--strm-url",
-        default=_env("FRAMEX_STRM_PUBLIC_URL"),
+        default=_env("PRESS_STRM_PUBLIC_URL"),
     )
     parser.add_argument(
         "--api-base",
-        default=_env("FRAMEX_API_BASE", default=DEFAULT_API_BASE),
+        default=_env("PRESS_API_BASE", default=DEFAULT_API_BASE),
     )
     parser.add_argument(
         "--site-url",
-        default=_env("FRAMEX_SITE_URL", default=DEFAULT_SITE_URL),
+        default=_env("PRESS_SITE_URL", default=DEFAULT_SITE_URL),
     )
     parser.add_argument(
-        "--subs-base",
-        default=_env("FRAMEX_SUBS_BASE", default=DEFAULT_SUBS_BASE),
+        "--player-key",
+        default=_env("PRESS_PLAYER_KEY", default=DEFAULT_PLAYER_KEY),
+    )
+    parser.add_argument(
+        "--sources",
+        default=_env("PRESS_SOURCES", default=DEFAULT_SOURCES),
     )
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
@@ -1071,7 +1046,8 @@ def main(argv=None) -> int:
     source = Source(
         api_base=args.api_base,
         site_url=args.site_url,
-        subs_base=args.subs_base,
+        player_key=args.player_key,
+        sources=args.sources,
         timeout=args.timeout,
     )
     writer = LibraryWriter(
@@ -1083,14 +1059,15 @@ def main(argv=None) -> int:
     app = App(source, writer, data_dir)
     app.verbose = args.verbose
     server = AppServer((args.host, args.port), app)
-    print(f"framex library on http://{public_host}:{args.port}")
+    print(f"pressplayz library on http://{public_host}:{args.port}")
     print(f"  api:       {source.api_base}")
+    print(f"  sources:   {', '.join(source.sources)}")
     print(f"  media:     {writer.root}")
     print(f"  public:    {public_url}")
     if "127.0.0.1" in public_url or "localhost" in public_url:
         print(
             "  warning: Jellyfin cannot reach a loopback public_url; set "
-            "FRAMEX_PUBLIC_URL to a reachable host.",
+            "PRESS_PUBLIC_URL to a reachable host.",
             file=sys.stderr,
         )
     try:

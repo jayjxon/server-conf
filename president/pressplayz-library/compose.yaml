@@ -1,0 +1,39 @@
+services:
+    pressplayz-library:
+        build:
+            context: ../../pressplayz
+            dockerfile: Dockerfile
+        container_name: pressplayz-library
+        restart: unless-stopped
+        security_opt:
+            - no-new-privileges:true
+        pids_limit: 200
+        user: ${PUID}:${PGID}
+        environment:
+            TZ: ${TZ:-Etc/UTC}
+            # same path/tree jellyfin mounts at /data; the writer puts entries
+            # under requests/ so the existing request library picks them up
+            PRESS_MEDIA_DIR: /data
+            PRESS_PUBLIC_URL: https://scraper.${DOMAINNAME}/pressplayz
+            # .strm files use the stable gateway route; the proxy remains
+            # under PRESS_PUBLIC_URL for the manifest/segment segments.
+            PRESS_STRM_PUBLIC_URL: https://scraper.${DOMAINNAME}
+            PRESS_DATA_DIR: /state
+            PRESS_API_BASE: ${PRESS_API_BASE:-https://vidnest.pro}
+            PRESS_SITE_URL: ${PRESS_SITE_URL:-https://pressplayz.top}
+            PRESS_SOURCES: ${PRESS_SOURCES:-j5wq,q7mv,vidora}
+        volumes:
+            - ${APP_ROOT}/jellyfin/media:/data
+            - ${APP_ROOT}/pressplayz-library:/state
+        expose:
+            - 8789
+        networks:
+            - traefik
+        labels:
+            traefik.enable: true
+            traefik.http.routers.pressplayz-library-rtr.rule: Host(`scraper.${DOMAINNAME}`) && PathPrefix(`/pressplayz`)
+            # authelia sees the prefixed path; traefik strips it before forwarding.
+            # only the explicit /play and /p namespaces bypass auth.
+            traefik.http.routers.pressplayz-library-rtr.middlewares: middlewares-authelia@file,pressplayz-strip@docker
+            traefik.http.middlewares.pressplayz-strip.stripprefix.prefixes: /pressplayz
+            traefik.http.services.pressplayz-library-svc.loadbalancer.server.port: 8789

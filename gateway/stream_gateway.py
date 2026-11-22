@@ -30,10 +30,15 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 DEFAULT_PORT = 8790
-USER_AGENT = "framex-gateway/1.0"
+USER_AGENT = "pressplayz-gateway/1.0"
 MEDIA_PATH_RE = re.compile(r"^/play/(?:movie/\d+|tv/\d+/\d+/\d+)/?$")
 SOURCES = (
-    ("framex", os.environ.get("FRAMEX_LIBRARY_URL", "http://framex-library:8789")),
+    (
+        "pressplayz",
+        os.environ.get(
+            "PRESS_PLAYZ_LIBRARY_URL", "http://pressplayz-library:8789"
+        ),
+    ),
 )
 
 

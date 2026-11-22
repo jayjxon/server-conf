@@ -10,7 +10,7 @@ services:
         pids_limit: 100
         environment:
             TZ: ${TZ:-Etc/UTC}
-            FRAMEX_LIBRARY_URL: http://framex-library:8789
+            PRESS_PLAYZ_LIBRARY_URL: http://pressplayz-library:8789
         expose:
             - 8790
         networks:

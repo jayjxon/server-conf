@@ -10,7 +10,7 @@ services:
             - dispatcharr
             - seerr
             - anime-library
-            - framex-library
+            - pressplayz-library
         security_opt:
             - no-new-privileges:true
         pids_limit: 100
@@ -29,7 +29,7 @@ services:
             DISPATCHARR_PUBLIC_URL: https://dispatcharr.${DOMAINNAME}
             ANIME_LIBRARY_URL: http://anime-library:8787
             ANIME_LANG: ${ANIME_LANG:-dub}
-            FRAMEX_LIBRARY_URL: http://framex-library:8789
+            PRESS_PLAYZ_LIBRARY_URL: http://pressplayz-library:8789
             LIBRARY_DIR: /library
             STATE_DIR: /state
             POLL_SECONDS: ${FULFILLER_POLL_SECONDS:-30}
