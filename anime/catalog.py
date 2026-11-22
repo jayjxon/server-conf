@@ -245,6 +245,10 @@ class Server(Record):
         """Resolve the player page to a playlist URL, or use `playlist` as-is."""
         return self._catalog.resolve(self.url, playlist=playlist)
 
+    def subtitles(self) -> list:
+        """Caption tracks the source exposes for this server entry."""
+        return self._catalog.subtitles(self.url)
+
     def download(self, path: str, seconds=None, start: float = 0.0,
                  playlist: str = None, progress: bool = None) -> str:
         return self._catalog.download(self, path, seconds=seconds, start=start,
@@ -658,6 +662,38 @@ def _playlist_serves_video(url: str, headers: dict, timeout: float) -> bool:
     return False
 
 
+_SUBTITLE_KINDS = ("captions", "subtitle", "subtitles", "cc")
+_SUBTITLE_EXTS = (".vtt", ".srt")
+
+
+def _subtitle_tracks(data: dict, base: str) -> list:
+    """Caption tracks from a getSources-style payload, thumbnails removed."""
+    tracks = data.get("tracks")
+    if not isinstance(tracks, list):
+        return []
+    found = []
+    for track in tracks:
+        if not isinstance(track, dict):
+            continue
+        value = track.get("file") or track.get("src") or track.get("url")
+        if not isinstance(value, str) or not value.strip():
+            continue
+        kind = str(track.get("kind") or "").strip().lower()
+        path = urlsplit(value).path.lower()
+        if kind:
+            if kind not in _SUBTITLE_KINDS:
+                continue
+        elif not path.endswith(_SUBTITLE_EXTS):
+            continue
+        found.append({
+            "url": urljoin(base, value.strip()),
+            "label": str(track.get("label") or ""),
+            "language": str(track.get("language") or track.get("lang") or ""),
+            "default": bool(track.get("default")),
+        })
+    return found
+
+
 # Player pages that hide their source: meta tags, a bare <video>, base64, or
 # Dean Edwards packed script.
 _VIDEO_TAG_RE = re.compile(r"""<(?:video|source)\b[^>]+src\s*=\s*["']([^"']+)["']""", re.I)
@@ -1000,6 +1036,28 @@ class Catalog:
 
         raise NoStream(self._no_manifest_hint(link, status, ctype, body, text))
 
+    def subtitles(self, link: str) -> list:
+        """Caption tracks exposed by a player page, for sidecar subtitles."""
+        if not link:
+            return []
+        status, headers, body = _read_response(
+            link, self._headers(link, "text/html,application/json,*/*"),
+            self.timeout)
+        text = body.decode("utf-8", "replace")
+        ctype = (headers.get("content-type") or "").lower()
+        data = None
+        if text.lstrip().startswith(("{", "[")) or "json" in ctype:
+            try:
+                data = json.loads(text)
+            except ValueError:
+                data = None
+        if not isinstance(data, dict):
+            payload = self._endpoint_payload(link, text)
+            data = payload[1] if payload else None
+        if not isinstance(data, dict):
+            return []
+        return _subtitle_tracks(data, link)
+
     def _prefer_playable(self, manifest: str, player_link: str) -> str:
         """Prefer a media playlist that actually serves video.
 
@@ -1034,7 +1092,7 @@ class Catalog:
                 return alternative
         return manifest
 
-    def _resolve_via_endpoint(self, link: str, text: str):
+    def _endpoint_payload(self, link: str, text: str):
         """Fill `sources_endpoint` from the page's data-* ids and read the JSON."""
         attrs = _data_attrs(text)
         if not attrs.get("id") and not attrs.get("mediaid"):
@@ -1057,14 +1115,23 @@ class Catalog:
         headers = self._headers(link, "application/json")
         headers["X-Requested-With"] = "XMLHttpRequest"
         try:
-            status, headers, body = _read_response(
-                url, headers, self.timeout)
+            _, _, body = _read_response(url, headers, self.timeout)
         except CatalogError:
             return None
         try:
             data = json.loads(body.decode("utf-8", "replace"))
         except ValueError:
             return None
+        if not isinstance(data, dict):
+            return None
+        return url, data
+
+    def _resolve_via_endpoint(self, link: str, text: str):
+        """Resolve the player page's API payload to a manifest URL."""
+        payload = self._endpoint_payload(link, text)
+        if not payload:
+            return None
+        url, data = payload
         found = _find_manifest(data)
         return urljoin(url, found) if found else None
 

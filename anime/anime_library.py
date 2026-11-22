@@ -19,6 +19,9 @@ Layout written under the media directory:
     anime/sub/Movies/<Title> (Year)/<Title> (Year).strm
     anime/dub/...   (same shape)
 
+Subtitles are written as sidecars next to each `.strm`
+(`<name>.<language>.vtt`), so Jellyfin picks them up without remuxing.
+
 Sub and dub are separate trees because Jellyfin cannot treat two independent
 HLS sources as two versions of one episode.  Add each tree as its own Jellyfin
 library; the UI shows the exact paths.
@@ -73,6 +76,50 @@ def safe_name(value, limit: int = 120) -> str:
 
 def human_count(value: int) -> str:
     return f"{value:,}"
+
+
+_LANGUAGE_CODES = {
+    "english": "en", "spanish": "es", "french": "fr", "german": "de",
+    "italian": "it", "portuguese": "pt", "russian": "ru", "japanese": "ja",
+    "korean": "ko", "chinese": "zh", "arabic": "ar", "hindi": "hi",
+    "tamil": "ta", "telugu": "te", "indonesian": "id", "thai": "th",
+    "vietnamese": "vi", "turkish": "tr", "polish": "pl", "dutch": "nl",
+    "filipino": "tl", "tagalog": "tl", "swedish": "sv", "danish": "da",
+    "norwegian": "no", "finnish": "fi", "czech": "cs", "greek": "el",
+    "hebrew": "he", "hungarian": "hu", "romanian": "ro", "ukrainian": "uk",
+}
+
+
+def subtitle_code(track: dict) -> str:
+    """ISO 639 code Jellyfin understands, derived from the track label."""
+    raw = str(track.get("language") or track.get("label") or "").strip().lower()
+    if raw in _LANGUAGE_CODES:
+        return _LANGUAGE_CODES[raw]
+    stem = re.split(r"[-(]", raw, 1)[0].strip()
+    if stem in _LANGUAGE_CODES:
+        return _LANGUAGE_CODES[stem]
+    letters = re.sub(r"[^a-z]", "", stem)
+    return letters[:3] or "und"
+
+
+def subtitle_extension(url: str, body: bytes) -> str:
+    """Extension matching the downloaded caption content."""
+    head = body.lstrip()[:4096]
+    if head.startswith(b"WEBVTT"):
+        return "vtt"
+    if b"-->" in head:
+        return "srt"
+    path = urlsplit(url).path.lower()
+    for ext in (".vtt", ".srt"):
+        if path.endswith(ext):
+            return ext[1:]
+    return ""
+
+
+def _origin_url(url: str) -> str:
+    parts = urlsplit(url)
+    return (f"{parts.scheme}://{parts.netloc}/"
+            if parts.scheme and parts.netloc else url)
 
 
 class _DescriptionParser(HTMLParser):
@@ -327,6 +374,35 @@ class LibraryWriter:
         temp.write_text(url.rstrip("/") + "\n", encoding="utf-8")
         os.replace(temp, path)
 
+    @staticmethod
+    def _write_sidecar(path: Path, body: bytes) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_name(path.name + ".tmp")
+        temp.write_bytes(body)
+        os.replace(temp, path)
+        return path
+
+    def _write_subtitles(self, strm_path: Path, tracks: list) -> list:
+        """Write caption tracks as `<video>.<lang>.<ext>` sidecars."""
+        stem = strm_path.with_suffix("")
+        for pattern in ("*.vtt", "*.srt"):
+            for old in stem.parent.glob(f"{stem.name}.*.{pattern}"):
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+        written, used = [], set()
+        for track in tracks:
+            code = track.get("code") or "und"
+            ext = track.get("ext") or "vtt"
+            name = f"{stem.name}.{code}.{ext}"
+            if name in used:
+                continue
+            used.add(name)
+            path = self._write_sidecar(stem.with_name(name), track["body"])
+            written.append(str(path))
+        return written
+
     def _cleanup(self, files, dirs) -> None:
         for file_name in files:
             path = Path(file_name)
@@ -346,12 +422,16 @@ class LibraryWriter:
 
     # -- public ------------------------------------------------------------
 
-    def write(self, show, langs: list) -> dict:
+    def write(self, show, langs: list, subtitles=None) -> dict:
         title = show.title or show.slug
         movie = self._is_movie(show)
         episodes = [] if movie else show.episodes
         if not movie and not episodes:
             raise CatalogError(f"{title} has no episodes")
+        subtitle_episode = None
+        if subtitles is not None:
+            candidates = show.episodes
+            subtitle_episode = candidates[0] if candidates else None
         label = self._label(show)
         files, dirs = [], set()
         try:
@@ -364,6 +444,9 @@ class LibraryWriter:
                     path = target / f"{label}.strm"
                     self._write_strm(path, self._play_url(show.slug, None, lang))
                     files.append(str(path))
+                    if subtitles is not None and subtitle_episode is not None:
+                        files.extend(self._write_subtitles(
+                            path, subtitles(subtitle_episode, lang)))
                 else:
                     show_dir = root / "Shows" / label
                     dirs.add(str(show_dir))
@@ -379,6 +462,9 @@ class LibraryWriter:
                         path = season_dir / filename
                         self._write_strm(path, self._play_url(show.slug, number, lang))
                         files.append(str(path))
+                        if subtitles is not None:
+                            files.extend(self._write_subtitles(
+                                path, subtitles(episode, lang)))
         except Exception:
             self._cleanup(files, dirs)
             raise
@@ -518,6 +604,45 @@ class App:
         })
         return detail
 
+    def _subtitles_for(self, episode, lang: str) -> list:
+        """Download caption tracks so Jellyfin can use them as sidecars."""
+        try:
+            server = episode.server(lang=lang)
+            tracks = server.subtitles()
+        except (CatalogError, NoStream) as exc:
+            self.log(f"subtitles unavailable lang={lang}: {exc}")
+            return []
+        if not tracks:
+            self.log(f"subtitles: source returned none for lang={lang}")
+            return []
+        headers = {
+            "User-Agent": self.catalog.user_agent,
+            "Accept": "*/*",
+            "Accept-Encoding": "identity",
+            "Referer": _origin_url(server.url),
+        }
+        payload = []
+        for track in tracks:
+            url = track.get("url") or ""
+            if not url:
+                continue
+            try:
+                request = Request(url, headers=headers)
+                with urlopen(request, timeout=self.timeout) as response:
+                    body = response.read(2_000_000)
+            except (HTTPError, URLError, OSError) as exc:
+                self.log(f"subtitle fetch failed {_short_url(url)}: {exc}")
+                continue
+            if body.startswith(b"\xef\xbb\xbf"):
+                body = body[3:]
+            ext = subtitle_extension(url, body)
+            if not ext:
+                self.log(f"subtitle skipped (not VTT/SRT) {_short_url(url)}")
+                continue
+            payload.append({"code": subtitle_code(track),
+                            "ext": ext, "body": body})
+        return payload
+
     # -- selections --------------------------------------------------------
 
     @staticmethod
@@ -552,7 +677,8 @@ class App:
                 self.library.remove(existing)
             try:
                 show = self.catalog.show(slug)
-                selection = self.library.write(show, langs)
+                selection = self.library.write(
+                    show, langs, subtitles=self._subtitles_for)
             except Exception:
                 if existing:
                     state["selections"] = [item for item in state["selections"]
