@@ -654,6 +654,7 @@ class Fulfiller:
         )
 
     def reconcile(self) -> None:
+        changed = False
         for key, item in list(self.state["items"].items()):
             if item.get("kind") != "vod":
                 continue
@@ -673,7 +674,9 @@ class Fulfiller:
             if result != item:
                 self.state["items"][key] = result
                 self._save_state()
-        self._refresh_jellyfin()
+                changed = True
+        if changed:
+            self._refresh_jellyfin()
 
 
 def setup_django() -> None:
