@@ -14,7 +14,7 @@ services:
             # same path/tree jellyfin mounts at /data; the writer puts entries
             # under requests/ so the existing request library picks them up
             CINECAT_MEDIA_DIR: /data
-            CINECAT_PUBLIC_URL: https://cinecat.${DOMAINNAME}
+            CINECAT_PUBLIC_URL: https://scraper.${DOMAINNAME}/cinecat
             CINECAT_DATA_DIR: /state
             CINECAT_SITE_URL: ${CINECAT_SITE_URL:-https://beta.cinecat.eu}
         volumes:
@@ -26,8 +26,9 @@ services:
             - traefik
         labels:
             traefik.enable: true
-            traefik.http.routers.cinecat-library-rtr.rule: Host(`cinecat.${DOMAINNAME}`)
-            # the JSON API is admin-only; /play and /p are bypassed in authelia
-            # because jellyfin and players fetch the .strm URLs directly
-            traefik.http.routers.cinecat-library-rtr.middlewares: middlewares-authelia@file
+            traefik.http.routers.cinecat-library-rtr.rule: Host(`scraper.${DOMAINNAME}`) && PathPrefix(`/cinecat`)
+            # authelia sees the prefixed path; traefik strips it before forwarding.
+            # only the explicit /play and /p namespaces bypass auth.
+            traefik.http.routers.cinecat-library-rtr.middlewares: middlewares-authelia@file,cinecat-strip@docker
+            traefik.http.middlewares.cinecat-strip.stripprefix.prefixes: /cinecat
             traefik.http.services.cinecat-library-svc.loadbalancer.server.port: 8788

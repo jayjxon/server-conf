@@ -126,7 +126,22 @@ class Source:
             "Origin": self.site_url,
         }
 
+    def _allowed_url(self, url: str) -> bool:
+        """Only HTTPS CineCat/CDN hosts may be fetched by this service."""
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower()
+        if parts.scheme != "https" or not host:
+            return False
+        api_host = (urlsplit(self.api_base).hostname or "").lower()
+        suffixes = ("totallyacdn.cc", "vdrk.site", "hls.lol")
+        return host == api_host or any(
+            host == suffix or host.endswith("." + suffix)
+            for suffix in suffixes
+        )
+
     def _fetch(self, url: str, accept: str = "application/json", limit: int = 0):
+        if not self._allowed_url(url):
+            raise CinecatError(f"blocked untrusted upstream URL: {url}")
         request = Request(url, headers=self._headers(accept))
         try:
             with urlopen(request, timeout=self.timeout) as response:
@@ -363,6 +378,39 @@ class LibraryWriter:
     def _strm(self, path: Path, url: str) -> None:
         self._write(path, url.rstrip("/") + "\n")
 
+    def rewrite_stream_urls(self, selections) -> int:
+        """Repoint existing .strm files after a public URL/path change."""
+        rewritten = 0
+        for selection in selections:
+            if not isinstance(selection, dict):
+                continue
+            media_type = str(selection.get("media_type") or "")
+            tmdb_id = _int(selection.get("tmdb_id"))
+            if media_type not in ("movie", "tv") or not tmdb_id:
+                continue
+            for name in selection.get("files") or []:
+                path = Path(name)
+                if path.suffix != ".strm" or not self._within_root(path):
+                    continue
+                if media_type == "movie":
+                    url = f"{self.public_url}/play/movie/{tmdb_id}"
+                else:
+                    match = re.search(r" - S(\d+)E(\d+) - ", path.name)
+                    if not match:
+                        continue
+                    url = (
+                        f"{self.public_url}/play/tv/{tmdb_id}/"
+                        f"{int(match.group(1))}/{int(match.group(2))}"
+                    )
+                try:
+                    current = path.read_text(encoding="utf-8").strip()
+                except OSError:
+                    continue
+                if current != url:
+                    self._strm(path, url)
+                    rewritten += 1
+        return rewritten
+
     def _tags(self, data: dict) -> str:
         output = []
         for key, value in data.items():
@@ -533,6 +581,13 @@ class App:
         self._resolve_lock = threading.Lock()
         self._resolve_cache = {}
         self.timeout = source.timeout
+        rewritten = self.writer.rewrite_stream_urls(
+            self.writer.state["selections"].values()
+        )
+        if rewritten:
+            self.log(
+                f"rewrote {rewritten} .strm URLs to {self.writer.public_url}"
+            )
 
     def log(self, message: str) -> None:
         stamp = time.strftime("%H:%M:%S")
@@ -785,6 +840,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _proxy_url(self, url: str, referer: str, segment: bool = False):
         app = self.server.app
+        if not app.source._allowed_url(url):
+            return self._error(403, "upstream host not allowed")
         head_only = self.command == "HEAD"
         headers = {
             "User-Agent": USER_AGENT,

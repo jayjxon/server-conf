@@ -15,7 +15,7 @@ services:
             # same path and tree jellyfin mounts at /data, so the library paths the
             # UI prints are exactly the ones to add in jellyfin
             ANIME_MEDIA_DIR: /data
-            ANIME_PUBLIC_URL: https://anime.${DOMAINNAME}
+            ANIME_PUBLIC_URL: https://scraper.${DOMAINNAME}/anime
             ANIME_DATA_DIR: /state
         volumes:
             - ${APP_ROOT}/jellyfin/media:/data
@@ -26,8 +26,9 @@ services:
             - traefik
         labels:
             traefik.enable: true
-            traefik.http.routers.anime-library-rtr.rule: Host(`anime.${DOMAINNAME}`)
-            # the JSON API needs authelia; /play and /p are explicitly bypassed
-            # in authelia's configuration because jellyfin/players fetch them directly
-            traefik.http.routers.anime-library-rtr.middlewares: middlewares-authelia@file
+            traefik.http.routers.anime-library-rtr.rule: Host(`scraper.${DOMAINNAME}`) && PathPrefix(`/anime`)
+            # authelia sees the prefixed path; traefik strips it before forwarding.
+            # only the explicit /play and /p namespaces bypass auth.
+            traefik.http.routers.anime-library-rtr.middlewares: middlewares-authelia@file,anime-strip@docker
+            traefik.http.middlewares.anime-strip.stripprefix.prefixes: /anime
             traefik.http.services.anime-library-svc.loadbalancer.server.port: 8787

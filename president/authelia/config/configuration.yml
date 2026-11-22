@@ -81,29 +81,15 @@ access_control:
           subject:
               - 'group:admins'
 
-        # anime-library is admins-only for the UI and API, but jellyfin and media
-        # players fetch the .strm URLs themselves and cannot complete an authelia
-        # redirect. those two proxy namespaces are therefore exempt. keep this rule
-        # ahead of the domain rule below.
-        - domain: 'anime.${DOMAINNAME}'
+        # both scraper proxies live under one host. authelia sees the prefixed
+        # path; traefik strips /anime or /cinecat before forwarding. only the
+        # player namespaces are public; the selector APIs stay admins-only.
+        - domain: 'scraper.${DOMAINNAME}'
           resources:
-              - '^/(play|p)/.*'
+              - '^/(anime|cinecat)/(play|p)/.*'
           policy: 'bypass'
 
-        - domain: 'anime.${DOMAINNAME}'
-          policy: 'one_factor'
-          subject:
-              - 'group:admins'
-
-        # cinecat-library: the selector API is admin-only, but the .strm URLs
-        # are fetched by jellyfin and players, so the proxy paths are exempt.
-        # keep this before the domain rule.
-        - domain: 'cinecat.${DOMAINNAME}'
-          resources:
-              - '^/(play|p)/.*'
-          policy: 'bypass'
-
-        - domain: 'cinecat.${DOMAINNAME}'
+        - domain: 'scraper.${DOMAINNAME}'
           policy: 'one_factor'
           subject:
               - 'group:admins'

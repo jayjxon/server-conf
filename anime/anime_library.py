@@ -358,6 +358,45 @@ class LibraryWriter:
         return (f"{self.public_url}/play/{quote(str(slug), safe='')}/"
                 f"{tail}/{lang}")
 
+    def rewrite_stream_urls(self, selections) -> int:
+        """Repoint existing .strm files after a public URL/path change."""
+        rewritten = 0
+        for selection in selections:
+            if not isinstance(selection, dict):
+                continue
+            slug = str(selection.get("slug") or "")
+            if not slug:
+                continue
+            for name in selection.get("files") or []:
+                path = Path(name)
+                if path.suffix != ".strm" or not self._within_root(path):
+                    continue
+                try:
+                    parts = path.resolve().relative_to(self.media_root).parts
+                except (OSError, ValueError):
+                    continue
+                if len(parts) < 4 or parts[0] != "anime":
+                    continue
+                lang = parts[1]
+                if lang not in ("sub", "dub"):
+                    continue
+                if "Movies" in parts:
+                    number = None
+                else:
+                    match = re.search(r" - S\d+E(\d+) - ", path.name)
+                    if not match:
+                        continue
+                    number = str(int(match.group(1)))
+                url = self._play_url(slug, number, lang)
+                try:
+                    current = path.read_text(encoding="utf-8").strip()
+                except OSError:
+                    continue
+                if current != url:
+                    self._write_strm(path, url)
+                    rewritten += 1
+        return rewritten
+
     # -- filesystem --------------------------------------------------------
 
     def _within_root(self, path: Path) -> bool:
@@ -510,6 +549,11 @@ class App:
         self._mutation_lock = threading.Lock()
         self._resolve_lock = threading.Lock()
         self._resolve_cache = {}
+        rewritten = self.library.rewrite_stream_urls(
+            self.state.load().get("selections") or []
+        )
+        if rewritten:
+            self.log(f"rewrote {rewritten} .strm URLs to {self.public_url}")
 
     # -- logging -----------------------------------------------------------
 
