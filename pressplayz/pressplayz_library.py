@@ -111,6 +111,39 @@ def _origin(url: str) -> str:
     )
 
 
+def _looks_like_media(head: bytes) -> bool:
+    """True when a segment starts with a video container, not a placeholder.
+
+    Some VidNest upstreams answer with a PNG/JPEG fallback (hotlink or missing
+    source) inside a playlist full of otherwise plausible segment URLs.
+    """
+    if not head:
+        return False
+    if (
+        head.startswith(b"\x89PNG\r\n\x1a\n")
+        or head.startswith(b"\xff\xd8\xff")
+        or head[:6] in (b"GIF87a", b"GIF89a")
+        or head.lstrip().startswith(b"<")
+    ):
+        return False
+    if head.startswith(b"\x47"):
+        return True
+    if len(head) >= 8 and head[4:8] == b"ftyp":
+        return True
+    if head.startswith(b"\x1a\x45\xdf\xa3"):
+        return True
+    # a TS stream may begin mid-packet; two 0x47 sync bytes 188 apart are a
+    # reliable signal, and the image check above already rejected placeholders
+    for index in range(min(len(head), 3 * 188)):
+        if (
+            head[index] == 0x47
+            and index + 188 < len(head)
+            and head[index + 188] == 0x47
+        ):
+            return True
+    return False
+
+
 class Source:
     """The VidNest stream lookup used by PressPlayZ's watch pages."""
 
@@ -192,6 +225,46 @@ class Source:
         )
         return body.decode("utf-8", "replace")
 
+    def _playable(self, playlist: str, base_url: str) -> bool:
+        """Check the first segment really is video before committing to a source."""
+        segment = next(
+            (
+                line.strip()
+                for line in playlist.splitlines()
+                if line.strip() and not line.startswith("#")
+            ),
+            None,
+        )
+        if not segment:
+            return False
+        if "#EXT-X-KEY" in playlist:
+            # AES-128 ciphertext has no container signature; a readable key is
+            # the strongest check available without decrypting the stream.
+            key_line = next(
+                (
+                    line
+                    for line in playlist.splitlines()
+                    if line.startswith("#EXT-X-KEY")
+                ),
+                "",
+            )
+            if "METHOD=NONE" in key_line:
+                return True
+            match = URI_ATTR_RE.search(key_line)
+            if not match:
+                return False
+            key_url = urljoin(base_url, match.group(1) or match.group(2))
+            try:
+                _, _, key = self._fetch(key_url, "*/*", limit=64)
+            except PressError:
+                return False
+            return len(key) >= 16
+        try:
+            _, _, head = self._fetch(urljoin(base_url, segment), "*/*", limit=4096)
+        except PressError:
+            return False
+        return _looks_like_media(head)
+
     def _api_url(self, media_type: str, tmdb_id: int, season, episode, source: str):
         if media_type == "movie":
             path = f"/api/stream/v1/movie/{int(tmdb_id)}"
@@ -251,6 +324,11 @@ class Source:
                 if "#EXTINF" not in text:
                     last_error = NoSource(f"{source} playlist has no segments: {url}")
                     continue
+                if not self._playable(text, url):
+                    last_error = NoSource(
+                        f"{source} playlist serves no video segments: {url}"
+                    )
+                    continue
                 return url
 
             lines = text.splitlines()
@@ -289,6 +367,11 @@ class Source:
             if "#EXTINF" not in playlist:
                 last_error = NoSource(
                     f"{source} variant has no segments: {variant_url}"
+                )
+                continue
+            if not self._playable(playlist, variant_url):
+                last_error = NoSource(
+                    f"{source} variant serves no video segments: {variant_url}"
                 )
                 continue
             return variant_url
