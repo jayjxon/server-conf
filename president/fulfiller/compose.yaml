@@ -36,6 +36,8 @@ services:
             RECONCILE_SECONDS: ${FULFILLER_RECONCILE_SECONDS:-21600}
             RETRY_SECONDS: ${FULFILLER_RETRY_SECONDS:-300}
             RETRY_ATTEMPTS: ${FULFILLER_RETRY_ATTEMPTS:-2}
+            SUBTITLE_BATCH: ${FULFILLER_SUBTITLE_BATCH:-6}
+            SUBTITLE_MAX_ATTEMPTS: ${FULFILLER_SUBTITLE_MAX_ATTEMPTS:-12}
         volumes:
             - ${APP_ROOT}/dispatcharr/data:/data:ro
             - ${APP_ROOT}/jellyfin/media/requests:/library

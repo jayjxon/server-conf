@@ -51,6 +51,11 @@ RETRY_SECONDS = max(0, int(os.environ.get("RETRY_SECONDS", "300")))
 RETRY_ATTEMPTS = max(0, int(os.environ.get("RETRY_ATTEMPTS", "2")))
 HTTP_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "30"))
 SUBTITLE_LANGUAGE = os.environ.get("SUBTITLE_LANGUAGE", "eng").strip() or "eng"
+# one subtitle search costs several seconds; small batches keep Seerr polling alive
+SUBTITLE_BATCH = max(1, int(os.environ.get("SUBTITLE_BATCH", "6")))
+SUBTITLE_MAX_ATTEMPTS = max(
+    1, int(os.environ.get("SUBTITLE_MAX_ATTEMPTS", "12"))
+)
 
 _BAD_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _YEAR_IN_TITLE = re.compile(
@@ -732,41 +737,152 @@ class Fulfiller:
         return self._jellyfin_uid
 
     @staticmethod
-    def _subtitle_sidecar(strm_path) -> str:
-        return str(Path(str(strm_path)).with_suffix(".en.srt"))
-
-    def _missing_sidecars(self, item: dict) -> list[str]:
+    def _strm_files(item: dict) -> list[str]:
         return [
             str(path)
             for path in item.get("files") or []
             if str(path).endswith(".strm")
-            and not Path(self._subtitle_sidecar(path)).is_file()
         ]
 
     def _with_subtitle_state(self, result, previous: dict):
-        """Carry the subtitle work state without making every poll look changed."""
+        """Every .strm addition needs subtitles, whichever source created it."""
         if not result:
             return result
         if previous.get("seerr_status"):
             result["seerr_status"] = previous["seerr_status"]
-        if result.get("kind") != "vod":
+        if not self._strm_files(result):
             return result
         old_status = previous.get("subtitles")
         files_changed = previous.get("files") != result.get("files")
         attempts = _int(previous.get("subtitle_attempts"), 0) or 0
-        if self._missing_sidecars(result):
-            if old_status == "failed" and not files_changed:
-                result["subtitles"] = "failed"
-                result["subtitle_attempts"] = attempts
-            else:
-                result["subtitles"] = "pending"
-                result["subtitle_attempts"] = 0 if files_changed else attempts
-        elif old_status:
+        if old_status == "failed" and not files_changed:
+            result["subtitles"] = "failed"
+            result["subtitle_attempts"] = attempts
+        elif old_status == "done" and not files_changed:
             result["subtitles"] = "done"
             result.pop("subtitle_attempts", None)
-        if previous.get("seerr_status"):
-            result["seerr_status"] = previous["seerr_status"]
+        else:
+            result["subtitles"] = "pending"
+            result["subtitle_attempts"] = 0 if files_changed else attempts
         return result
+
+    @staticmethod
+    def _has_subtitle(media: dict) -> bool:
+        return any(
+            str(stream.get("Type") or "").lower() == "subtitle"
+            for stream in media.get("MediaStreams") or []
+            if isinstance(stream, dict)
+        )
+
+    @staticmethod
+    def _imdb_id(title, year):
+        title = str(title or "").strip()
+        if not title:
+            return None
+        query = urllib.parse.quote(title)
+        try:
+            code, data = http_json(
+                "GET",
+                "https://v3.sg.media-imdb.com/suggestion/x/" + query + ".json",
+                headers={"User-Agent": "seerr-fulfiller/1.0"},
+            )
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            log(f"IMDb lookup for {title!r} failed: {exc}")
+            return None
+        if code != 200 or not isinstance(data, dict):
+            return None
+        wanted = normalized_title(title)
+        fuzzy = None
+        for entry in data.get("d") or []:
+            if not isinstance(entry, dict):
+                continue
+            imdb = str(entry.get("id") or "")
+            if not imdb.startswith("tt"):
+                continue
+            found_year = _int(entry.get("y"))
+            if year and found_year and abs(found_year - int(year)) > 1:
+                continue
+            candidate = normalized_title(entry.get("l"))
+            if candidate == wanted:
+                return imdb
+            if fuzzy is None and (wanted in candidate or candidate in wanted):
+                fuzzy = imdb
+        return fuzzy
+
+    def _ensure_imdb_ids(self, item: dict, media_items: list[dict]) -> bool:
+        """Subbuzz searches only by IMDb id; add one before the subtitle search."""
+        uid = self._jellyfin_user_id()
+        if not uid:
+            return False
+        targets = set()
+        for media in media_items:
+            target = (
+                media.get("Id")
+                if item.get("media_type") == "movie"
+                else media.get("SeriesId")
+            )
+            if target:
+                targets.add(str(target))
+        if not targets:
+            return False
+        for target in targets:
+            try:
+                code, dto = http_json(
+                    "GET",
+                    JELLYFIN_URL.rstrip("/") + f"/Users/{uid}/Items/{target}",
+                    headers=self._jellyfin_headers(),
+                    timeout=20,
+                )
+            except (urllib.error.URLError, OSError, ValueError) as exc:
+                log(f"jellyfin item {target} read failed: {exc}")
+                return False
+            if code != 200 or not isinstance(dto, dict):
+                log(f"jellyfin item {target} returned HTTP {code}")
+                return False
+            providers = dto.get("ProviderIds")
+            if not isinstance(providers, dict):
+                providers = {}
+            if providers.get("Imdb"):
+                continue
+            imdb = self._imdb_id(item.get("title"), item.get("year"))
+            if not imdb:
+                log(f"no IMDb id found for {item.get('title')!r}")
+                return False
+            providers["Imdb"] = imdb
+            dto["ProviderIds"] = providers
+            try:
+                code, _ = http_json(
+                    "POST",
+                    JELLYFIN_URL.rstrip("/") + f"/Items/{target}",
+                    payload=dto,
+                    headers=self._jellyfin_headers(),
+                    timeout=20,
+                )
+            except (urllib.error.URLError, OSError, ValueError) as exc:
+                log(f"jellyfin item {target} update failed: {exc}")
+                return False
+            if code not in (200, 204):
+                log(f"jellyfin item {target} update returned HTTP {code}")
+                return False
+            log(f"IMDb id {imdb} set for {item.get('title')!r}")
+        return True
+
+    def _subtitle_attempt(self, item: dict, reason: str) -> bool:
+        attempts = (_int(item.get("subtitle_attempts"), 0) or 0) + 1
+        item["subtitle_attempts"] = attempts
+        if attempts >= SUBTITLE_MAX_ATTEMPTS:
+            item["subtitles"] = "failed"
+            log(
+                f"external subtitles: {reason} for {item.get('title')!r}; "
+                f"giving up after {attempts} attempts"
+            )
+        else:
+            item["subtitles"] = "pending"
+            log(
+                f"external subtitles: {reason} for {item.get('title')!r}; "
+                f"retry {attempts}/{SUBTITLE_MAX_ATTEMPTS}"
+            )
+        return False
 
     def _jellyfin_media_items(self, item: dict) -> list[dict]:
         """Return the Jellyfin items whose paths are in this state entry."""
@@ -816,6 +932,7 @@ class Fulfiller:
         for series in series_rows:
             if marker and marker not in str(series.get("Path") or ""):
                 continue
+            series_id = str(series.get("Id") or "")
             episode_query = urllib.parse.urlencode(
                 {"userId": uid, "fields": fields}
             )
@@ -824,11 +941,13 @@ class Fulfiller:
             )
             for episode in (episodes or {}).get("Items") or []:
                 if Path(str(episode.get("Path") or "")).name in names:
+                    episode = dict(episode)
+                    episode.setdefault("SeriesId", series_id)
                     result.append(episode)
         return result
 
     def _ensure_external_subtitles(self, item: dict) -> bool:
-        """Download one external subtitle for each new .strm, if Jellyfin can."""
+        """Download external subtitles for missing .strm files in small batches."""
         if item.get("subtitles") != "pending":
             return False
         if not JELLYFIN_API_KEY:
@@ -838,36 +957,41 @@ class Fulfiller:
             return False
         media_items = self._jellyfin_media_items(item)
         if not media_items:
-            attempts = (_int(item.get("subtitle_attempts"), 0) or 0) + 1
-            item["subtitle_attempts"] = attempts
-            if attempts >= 4:
-                item["subtitles"] = "failed"
-                log(f"external subtitles: Jellyfin never listed {item.get('title')!r}")
-            return False
+            return self._subtitle_attempt(
+                item, "Jellyfin has not listed the item yet"
+            )
+        if not self._ensure_imdb_ids(item, media_items):
+            return self._subtitle_attempt(item, "no usable IMDb id")
         by_name = {
             Path(str(media.get("Path") or "")).name: media
             for media in media_items
         }
-        expected = [
-            str(path)
-            for path in item.get("files") or []
-            if str(path).endswith(".strm")
-        ]
-        downloaded = 0
-        unavailable = 0
+        expected = self._strm_files(item)
+        missing = []
         waiting = 0
         for strm in expected:
-            sidecar = self._subtitle_sidecar(strm)
-            if Path(sidecar).is_file():
-                continue
             media = by_name.get(Path(strm).name)
             if not media:
                 waiting += 1
-                continue
-            # A deleted sidecar can still be listed as an external stream until
-            # the next scan, so the file on disk is the source of truth here.
+            elif not self._has_subtitle(media):
+                missing.append((strm, media))
+        if not missing and not waiting:
+            item["subtitles"] = "done"
+            item.pop("subtitle_attempts", None)
+            return False
+
+        downloaded = 0
+        unavailable = 0
+        failed = 0
+        batch = missing[:SUBTITLE_BATCH]
+        for strm, media in batch:
             item_id = media.get("Id")
-            search_path = f"/Items/{item_id}/RemoteSearch/Subtitles/{SUBTITLE_LANGUAGE}"
+            if not item_id:
+                failed += 1
+                continue
+            search_path = (
+                f"/Items/{item_id}/RemoteSearch/Subtitles/{SUBTITLE_LANGUAGE}"
+            )
             code, candidates = http_json(
                 "GET",
                 JELLYFIN_URL.rstrip("/") + search_path,
@@ -875,7 +999,7 @@ class Fulfiller:
                 timeout=30,
             )
             if code != 200 or not isinstance(candidates, list):
-                waiting += 1
+                failed += 1
                 continue
             candidates = [
                 candidate
@@ -897,7 +1021,7 @@ class Fulfiller:
                 timeout=30,
             )
             if code not in (200, 204):
-                waiting += 1
+                failed += 1
                 log(
                     f"external subtitle download for {Path(strm).name!r} "
                     f"returned HTTP {code}"
@@ -905,22 +1029,33 @@ class Fulfiller:
                 continue
             downloaded += 1
             log(f"external subtitle saved for {Path(strm).name!r}")
-        if waiting:
-            attempts = (_int(item.get("subtitle_attempts"), 0) or 0) + 1
-            item["subtitle_attempts"] = attempts
-            if attempts >= 4:
-                item["subtitles"] = "failed"
-                log(
-                    f"external subtitles: gave up on {item.get('title')!r} "
-                    f"after {attempts} attempts ({waiting} items waiting)"
-                )
+
+        remaining = (
+            waiting + failed + unavailable + max(0, len(missing) - len(batch))
+        )
+        if remaining <= 0:
+            item["subtitles"] = "done"
+            item.pop("subtitle_attempts", None)
+            log(f"external subtitles complete for {item.get('title')!r}")
             return downloaded > 0
-        item["subtitles"] = "done"
-        item.pop("subtitle_attempts", None)
-        if downloaded or unavailable:
+        attempts = (
+            0
+            if downloaded
+            else (_int(item.get("subtitle_attempts"), 0) or 0) + 1
+        )
+        item["subtitle_attempts"] = attempts
+        if attempts >= SUBTITLE_MAX_ATTEMPTS:
+            item["subtitles"] = "failed"
+            log(
+                f"external subtitles: giving up on {item.get('title')!r} "
+                f"after {attempts} attempts "
+                f"({downloaded} saved, {remaining} still missing)"
+            )
+        else:
+            item["subtitles"] = "pending"
             log(
                 f"external subtitles for {item.get('title')!r}: "
-                f"{downloaded} saved, {unavailable} unavailable"
+                f"{downloaded} saved, {remaining} still missing"
             )
         return downloaded > 0
 
@@ -1003,6 +1138,18 @@ class Fulfiller:
             return
         key = f"{media_type}:{tmdb_id}"
         previous = self.state["items"].get(key) or {}
+        if (
+            not pending
+            and self._strm_files(previous)
+            and previous.get("subtitles") in (None, "pending")
+        ):
+            # Also covers items added before subtitle work was tracked.
+            if previous.get("subtitles") is None:
+                previous["subtitles"] = "pending"
+            refreshed = self._ensure_external_subtitles(previous)
+            self._save_state()
+            if refreshed:
+                self._refresh_jellyfin()
         if not pending and previous.get("kind") == "anime" and previous.get("slug"):
             if self._mark_seerr_available(request, previous, requested_seasons):
                 self._save_state()
@@ -1023,12 +1170,6 @@ class Fulfiller:
                 )
             )
         ):
-            if previous.get("subtitles") == "pending":
-                if self._ensure_external_subtitles(previous):
-                    self._save_state()
-                    self._refresh_jellyfin()
-                else:
-                    self._save_state()
             if self._mark_seerr_available(request, previous, requested_seasons):
                 self._save_state()
             return
